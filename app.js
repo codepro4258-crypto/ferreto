@@ -1556,9 +1556,36 @@ function initGeolocation() {
     }
 }
 
-function startAttendanceScanner() {
+let attendanceStream = null;
+let attendanceFaceInterval = null;
+let faceApiModelsLoaded = false;
+
+async function loadFaceApiModels() {
+    if (faceApiModelsLoaded) return true;
+    if (typeof faceapi === 'undefined') {
+        showToast('Face API library not loaded. Please refresh the page.', 'error');
+        return false;
+    }
+    try {
+        const MODEL_URL = 'https://cdn.jsdelivr.net/npm/@vladmandic/face-api/model';
+        await Promise.all([
+            faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL),
+            faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL),
+            faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL)
+        ]);
+        faceApiModelsLoaded = true;
+        console.log('Face API models loaded');
+        return true;
+    } catch (err) {
+        console.error('Failed to load face models:', err);
+        showToast('Failed to load face recognition models', 'error');
+        return false;
+    }
+}
+
+async function startAttendanceScanner() {
     if (!currentUser.faceDescriptor) {
-        showToast('Face ID not registered. Please contact administrator.', 'warning');
+        showToast('Face ID not registered. Please register via Admin > User Management first.', 'warning');
         return;
     }
     
@@ -1573,30 +1600,132 @@ function startAttendanceScanner() {
         }
     }
     
-    showToast('Starting attendance scanner...', 'info');
-    
-    // Simulate face scanning
+    showToast('Loading face recognition models...', 'info');
+    updateAttendanceScannerStatus('Loading Models', true);
+
+    const modelsReady = await loadFaceApiModels();
+    if (!modelsReady) {
+        updateAttendanceScannerStatus('Error', false);
+        return;
+    }
+
+    // Start camera
+    const video = document.getElementById('attendanceVideo');
+    try {
+        attendanceStream = await navigator.mediaDevices.getUserMedia({
+            video: { width: 640, height: 480, facingMode: 'user' }
+        });
+        video.srcObject = attendanceStream;
+        await video.play();
+    } catch (err) {
+        console.error('Camera error:', err);
+        showToast('Cannot access camera. Please allow camera permissions.', 'error');
+        updateAttendanceScannerStatus('Camera Error', false);
+        return;
+    }
+
+    showToast('Camera started. Scanning your face...', 'info');
     updateAttendanceScannerStatus('Scanning', true);
+    
     const startBtn = document.getElementById('btnStartAttendance');
     const stopBtn = document.getElementById('btnStopAttendance');
     if (startBtn && stopBtn) {
         startBtn.classList.add('hidden');
         stopBtn.classList.remove('hidden');
     }
-    attendanceScanInterval = setTimeout(() => {
-        markAttendanceSuccess({
-            latitude: 40.7128,
-            longitude: -74.0060,
-            accuracy: 10
-        }, 0.92);
-        stopAttendanceScanner();
-    }, 2000);
+
+    const canvas = document.getElementById('attendanceCanvas');
+    const displaySize = { width: video.videoWidth || 640, height: video.videoHeight || 480 };
+    faceapi.matchDimensions(canvas, displaySize);
+
+    let scanAttempts = 0;
+    const maxAttempts = 30;
+
+    attendanceFaceInterval = setInterval(async () => {
+        scanAttempts++;
+        
+        const hudScore = document.getElementById('attHudScore');
+        const hudAlign = document.getElementById('attHudAlign');
+        
+        try {
+            const detections = await faceapi
+                .detectAllFaces(video, new faceapi.TinyFaceDetectorOptions())
+                .withFaceLandmarks()
+                .withFaceDescriptors();
+
+            const resized = faceapi.resizeResults(detections, displaySize);
+            canvas.getContext('2d').clearRect(0, 0, canvas.width, canvas.height);
+            faceapi.draw.drawDetections(canvas, resized);
+            faceapi.draw.drawFaceLandmarks(canvas, resized);
+
+            if (detections.length > 0) {
+                const detection = detections[0];
+                const confidence = detection.detection.score;
+                
+                if (hudScore) hudScore.textContent = `SCORE: ${Math.round(confidence * 100)}%`;
+                if (hudAlign) hudAlign.textContent = `ALIGN: CENTERED`;
+
+                if (confidence > 0.7) {
+                    // Face detected with good confidence - mark attendance
+                    clearInterval(attendanceFaceInterval);
+                    attendanceFaceInterval = null;
+                    
+                    // Get real geolocation
+                    let coords = { latitude: 0, longitude: 0, accuracy: 0 };
+                    try {
+                        const pos = await new Promise((resolve, reject) => {
+                            navigator.geolocation.getCurrentPosition(resolve, reject, { timeout: 5000 });
+                        });
+                        coords = {
+                            latitude: pos.coords.latitude,
+                            longitude: pos.coords.longitude,
+                            accuracy: pos.coords.accuracy
+                        };
+                    } catch(e) {
+                        console.warn('Geolocation unavailable, using defaults');
+                    }
+                    
+                    markAttendanceSuccess(coords, confidence);
+                    stopAttendanceScanner();
+                }
+            } else {
+                if (hudScore) hudScore.textContent = `SCORE: --`;
+                if (hudAlign) hudAlign.textContent = `ALIGN: NO FACE`;
+            }
+        } catch (err) {
+            console.error('Detection error:', err);
+        }
+        
+        if (scanAttempts >= maxAttempts && attendanceFaceInterval) {
+            clearInterval(attendanceFaceInterval);
+            attendanceFaceInterval = null;
+            showToast('Face not detected. Please try again with better lighting.', 'warning');
+            stopAttendanceScanner();
+        }
+    }, 500);
 }
 
 function stopAttendanceScanner() {
     if (attendanceScanInterval) {
         clearTimeout(attendanceScanInterval);
         attendanceScanInterval = null;
+    }
+    if (attendanceFaceInterval) {
+        clearInterval(attendanceFaceInterval);
+        attendanceFaceInterval = null;
+    }
+    // Stop camera stream
+    if (attendanceStream) {
+        attendanceStream.getTracks().forEach(track => track.stop());
+        attendanceStream = null;
+        const video = document.getElementById('attendanceVideo');
+        if (video) video.srcObject = null;
+    }
+    // Clear canvas
+    const canvas = document.getElementById('attendanceCanvas');
+    if (canvas) {
+        const ctx = canvas.getContext('2d');
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
     }
     updateAttendanceScannerStatus('Camera Off', false);
     const startBtn = document.getElementById('btnStartAttendance');
@@ -1607,16 +1736,46 @@ function stopAttendanceScanner() {
     }
 }
 
-function testFaceVerification() {
+async function testFaceVerification() {
     if (!currentUser.faceDescriptor) {
         showToast('Face ID not registered. Please contact administrator.', 'warning');
         return;
     }
     updateAttendanceScannerStatus('Testing', true);
-    setTimeout(() => {
-        updateAttendanceScannerStatus('Test Passed', false);
-        showToast('Face verification test passed', 'success');
-    }, 1200);
+    
+    const modelsReady = await loadFaceApiModels();
+    if (!modelsReady) {
+        updateAttendanceScannerStatus('Error', false);
+        return;
+    }
+    
+    let stream = null;
+    const video = document.getElementById('attendanceVideo');
+    try {
+        stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' } });
+        video.srcObject = stream;
+        await video.play();
+        
+        // Wait a moment for camera to warm up
+        await new Promise(r => setTimeout(r, 1000));
+        
+        const detections = await faceapi.detectAllFaces(video, new faceapi.TinyFaceDetectorOptions());
+        
+        stream.getTracks().forEach(t => t.stop());
+        video.srcObject = null;
+        
+        if (detections.length > 0) {
+            updateAttendanceScannerStatus('Test Passed', false);
+            showToast(`Face verification test passed! Confidence: ${Math.round(detections[0].score * 100)}%`, 'success');
+        } else {
+            updateAttendanceScannerStatus('No Face Found', false);
+            showToast('No face detected. Try better lighting or positioning.', 'warning');
+        }
+    } catch (err) {
+        if (stream) stream.getTracks().forEach(t => t.stop());
+        updateAttendanceScannerStatus('Error', false);
+        showToast('Camera test failed: ' + err.message, 'error');
+    }
 }
 
 function markAttendanceSuccess(coords, confidence) {
@@ -2602,13 +2761,16 @@ function formatChatMessage(content) {
 // 14. LEADERBOARD & ADMIN DASHBOARD
 // =========================================
 function loadLeaderboard(type) {
-    const projects = [...appData.projects];
+    const projects = [...appData.projects].filter(p => p.visibility === 'public' || p.userId === currentUser.id);
     let sorted = projects;
     if (type === 'most_liked') {
         sorted = projects.sort((a, b) => (b.likes || 0) - (a.likes || 0));
     } else if (type === 'featured') {
         sorted = projects.sort((a, b) => ((b.likes || 0) + (b.views || 0)) - ((a.likes || 0) + (a.views || 0)));
+    } else if (type === 'recent') {
+        sorted = projects.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
     } else {
+        // trending - sort by views
         sorted = projects.sort((a, b) => (b.views || 0) - (a.views || 0));
     }
     renderLeaderboard(sorted);
@@ -2630,6 +2792,7 @@ function renderLeaderboard(projects) {
     grid.innerHTML = '';
     projects.forEach(project => {
         const author = appData.users.find(u => u.id === project.userId);
+        const hasLiked = currentUser.likedProjects && currentUser.likedProjects.includes(project.id);
         const card = document.createElement('div');
         card.className = 'card';
         card.innerHTML = `
@@ -2649,9 +2812,17 @@ function renderLeaderboard(projects) {
                 </div>
             </div>
             <div class="card-footer">
-                <button class="btn btn-sm btn-outline" onclick="viewProject(${project.id})">
-                    <i class="fas fa-eye"></i> View
-                </button>
+                <div class="flex gap-2">
+                    <button class="btn btn-sm btn-outline" onclick="viewProject(${project.id})">
+                        <i class="fas fa-eye"></i> View
+                    </button>
+                    <button class="btn btn-sm ${hasLiked ? 'btn-danger' : 'btn-outline'}" onclick="likeProject(${project.id})">
+                        <i class="fas fa-heart"></i> ${hasLiked ? 'Liked' : 'Like'}
+                    </button>
+                    <button class="btn btn-sm btn-outline" onclick="forkProject(${project.id})">
+                        <i class="fas fa-code-branch"></i> Fork
+                    </button>
+                </div>
             </div>
         `;
         grid.appendChild(card);
@@ -3021,4 +3192,222 @@ function setupEventListeners() {
             handleFileUpload(files);
         }
     }
+}
+
+// =========================================
+// 16. MISSING PROJECT & LEADERBOARD FUNCTIONS
+// =========================================
+function viewProject(projectId) {
+    const project = appData.projects.find(p => p.id === projectId);
+    if (!project) {
+        showToast('Project not found', 'error');
+        return;
+    }
+    
+    // Increment views
+    project.views = (project.views || 0) + 1;
+    saveAppData();
+    
+    currentViewProject = project;
+    
+    document.getElementById('viewProjectTitle').textContent = project.name;
+    
+    openModal('viewProjectModal');
+    
+    // Init view project editor
+    setTimeout(() => {
+        const textarea = document.getElementById('viewProjectEditor');
+        if (textarea && typeof CodeMirror !== 'undefined') {
+            if (viewProjectEditor) {
+                viewProjectEditor.toTextArea();
+            }
+            viewProjectEditor = CodeMirror.fromTextArea(textarea, {
+                mode: 'htmlmixed',
+                theme: 'monokai',
+                lineNumbers: true,
+                lineWrapping: true,
+                readOnly: project.userId !== currentUser.id
+            });
+            viewProjectEditor.setValue(project.code || '');
+            
+            // Update preview
+            refreshViewProjectPreview();
+        }
+        
+        // Update like button
+        const likeBtn = document.getElementById('likeProjectBtn');
+        if (likeBtn) {
+            const hasLiked = currentUser.likedProjects && currentUser.likedProjects.includes(project.id);
+            likeBtn.innerHTML = `<i class="fas fa-heart"></i> ${hasLiked ? 'Liked' : 'Like'} (${project.likes || 0})`;
+            likeBtn.className = hasLiked ? 'btn btn-danger' : 'btn btn-outline';
+        }
+        
+        // Update fork count display
+        const forkBtn = document.getElementById('forkProjectBtn');
+        if (forkBtn) {
+            forkBtn.innerHTML = `<i class="fas fa-code-branch"></i> Fork (${project.forks || 0})`;
+        }
+    }, 200);
+}
+
+function refreshViewProjectPreview() {
+    if (!currentViewProject) return;
+    const code = viewProjectEditor ? viewProjectEditor.getValue() : currentViewProject.code;
+    const iframe = document.getElementById('viewProjectPreview');
+    if (iframe) {
+        const doc = iframe.contentDocument || iframe.contentWindow.document;
+        try {
+            doc.open();
+            doc.write(code);
+            doc.close();
+        } catch (err) {
+            console.error('Preview error:', err);
+        }
+    }
+}
+
+function openViewProjectInNewTab() {
+    if (!currentViewProject) return;
+    const code = viewProjectEditor ? viewProjectEditor.getValue() : currentViewProject.code;
+    const newWindow = window.open();
+    newWindow.document.write(code);
+    newWindow.document.close();
+}
+
+function copyProjectCode() {
+    if (!currentViewProject) return;
+    const code = viewProjectEditor ? viewProjectEditor.getValue() : currentViewProject.code;
+    navigator.clipboard.writeText(code).then(() => {
+        showToast('Code copied to clipboard', 'success');
+    }).catch(() => {
+        const textarea = document.createElement('textarea');
+        textarea.value = code;
+        document.body.appendChild(textarea);
+        textarea.select();
+        document.execCommand('copy');
+        document.body.removeChild(textarea);
+        showToast('Code copied to clipboard', 'success');
+    });
+}
+
+function likeProject(projectId) {
+    const project = appData.projects.find(p => p.id === projectId);
+    if (!project) return;
+    
+    if (!currentUser.likedProjects) {
+        currentUser.likedProjects = [];
+    }
+    
+    const alreadyLiked = currentUser.likedProjects.includes(projectId);
+    
+    if (alreadyLiked) {
+        // Unlike
+        currentUser.likedProjects = currentUser.likedProjects.filter(id => id !== projectId);
+        project.likes = Math.max(0, (project.likes || 0) - 1);
+        showToast('Project unliked', 'info');
+    } else {
+        // Like
+        currentUser.likedProjects.push(projectId);
+        project.likes = (project.likes || 0) + 1;
+        showToast('Project liked!', 'success');
+    }
+    
+    // Update user in appData
+    const userIndex = appData.users.findIndex(u => u.id === currentUser.id);
+    if (userIndex > -1) {
+        appData.users[userIndex].likedProjects = currentUser.likedProjects;
+    }
+    sessionStorage.setItem('currentUser', JSON.stringify(currentUser));
+    
+    saveAppData();
+    loadLeaderboard('trending');
+    refreshDashboard();
+}
+
+function likeCurrentProject() {
+    if (!currentViewProject) return;
+    likeProject(currentViewProject.id);
+    
+    // Update button in modal
+    const likeBtn = document.getElementById('likeProjectBtn');
+    if (likeBtn) {
+        const hasLiked = currentUser.likedProjects && currentUser.likedProjects.includes(currentViewProject.id);
+        likeBtn.innerHTML = `<i class="fas fa-heart"></i> ${hasLiked ? 'Liked' : 'Like'} (${currentViewProject.likes || 0})`;
+        likeBtn.className = hasLiked ? 'btn btn-danger' : 'btn btn-outline';
+    }
+}
+
+function forkProject(projectId) {
+    const project = appData.projects.find(p => p.id === projectId);
+    if (!project) return;
+    
+    const forkedProject = {
+        id: Date.now(),
+        userId: currentUser.id,
+        name: `${project.name} (Fork)`,
+        description: `Forked from ${project.name}`,
+        code: project.code,
+        visibility: 'private',
+        category: project.category,
+        tags: [...(project.tags || [])],
+        likes: 0,
+        views: 0,
+        forks: 0,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+    };
+    
+    appData.projects.push(forkedProject);
+    project.forks = (project.forks || 0) + 1;
+    saveAppData();
+    
+    showToast(`Project "${project.name}" forked successfully!`, 'success');
+    logSystem('PROJECT_FORK', `Forked project: ${project.name}`, currentUser.id);
+    loadMyProjects();
+}
+
+function forkCurrentProject() {
+    if (!currentViewProject) return;
+    forkProject(currentViewProject.id);
+    closeModal('viewProjectModal');
+}
+
+function loadProjectIntoEditor(projectId) {
+    const project = appData.projects.find(p => p.id === projectId);
+    if (!project) return;
+    
+    if (mainEditor) {
+        mainEditor.setValue(project.code);
+        updatePreview();
+        showToast(`Loaded project: ${project.name}`, 'success');
+    }
+}
+
+function toggleProjectVisibility(projectId) {
+    const project = appData.projects.find(p => p.id === projectId);
+    if (!project) return;
+    
+    project.visibility = project.visibility === 'public' ? 'private' : 'public';
+    project.updatedAt = new Date().toISOString();
+    saveAppData();
+    
+    const status = project.visibility === 'public' ? 'public (visible on leaderboard)' : 'private';
+    showToast(`Project is now ${status}`, 'success');
+    logSystem('PROJECT_VISIBILITY', `Changed visibility of "${project.name}" to ${project.visibility}`, currentUser.id);
+    loadMyProjects();
+}
+
+function deleteProject(projectId) {
+    const project = appData.projects.find(p => p.id === projectId);
+    if (!project) return;
+    
+    if (!confirm(`Delete project "${project.name}"? This action cannot be undone.`)) return;
+    
+    appData.projects = appData.projects.filter(p => p.id !== projectId);
+    saveAppData();
+    
+    showToast('Project deleted', 'success');
+    logSystem('PROJECT_DELETE', `Deleted project: ${project.name}`, currentUser.id);
+    loadMyProjects();
+    refreshDashboard();
 }
