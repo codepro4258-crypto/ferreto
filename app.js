@@ -50,6 +50,9 @@ let registrationInterval = null;
 let registrationSamples = 0;
 let registrationUserId = null;
 let attendanceScanInterval = null;
+let registrationStream = null;
+let registrationDescriptorSamples = [];
+let registrationProcessingFrame = false;
 
 // =========================================
 // 3. INITIALIZATION
@@ -1560,6 +1563,49 @@ let attendanceStream = null;
 let attendanceFaceInterval = null;
 let faceApiModelsLoaded = false;
 
+function normalizeFaceDescriptor(descriptor) {
+    if (!descriptor) return null;
+    if (Array.isArray(descriptor)) return descriptor;
+    if (typeof descriptor === 'string') {
+        try {
+            const parsed = JSON.parse(descriptor);
+            return Array.isArray(parsed) ? parsed : null;
+        } catch (err) {
+            return null;
+        }
+    }
+    if (typeof descriptor === 'object' && Array.isArray(descriptor.values)) {
+        return descriptor.values;
+    }
+    return null;
+}
+
+function calculateDescriptorDistance(descriptorA, descriptorB) {
+    const a = normalizeFaceDescriptor(descriptorA);
+    const b = normalizeFaceDescriptor(descriptorB);
+    if (!a || !b || a.length !== b.length) return Number.POSITIVE_INFINITY;
+    let sum = 0;
+    for (let i = 0; i < a.length; i += 1) {
+        const diff = a[i] - b[i];
+        sum += diff * diff;
+    }
+    return Math.sqrt(sum);
+}
+
+function getDescriptorMatchDistance(currentDescriptor, enrolledDescriptor) {
+    const enrolled = normalizeFaceDescriptor(enrolledDescriptor);
+    if (!enrolled) return Number.POSITIVE_INFINITY;
+    if (Array.isArray(enrolled[0])) {
+        return enrolled.reduce((best, candidate) => Math.min(best, calculateDescriptorDistance(currentDescriptor, candidate)), Number.POSITIVE_INFINITY);
+    }
+    return calculateDescriptorDistance(currentDescriptor, enrolled);
+}
+
+function descriptorDistanceToConfidence(distance) {
+    const normalized = Math.max(0, Math.min(1, 1 - (distance / ENTERPRISE_CONFIG.FACE.THRESHOLD)));
+    return normalized;
+}
+
 async function loadFaceApiModels() {
     if (faceApiModelsLoaded) return true;
     if (typeof faceapi === 'undefined') {
@@ -1584,7 +1630,8 @@ async function loadFaceApiModels() {
 }
 
 async function startAttendanceScanner() {
-    if (!currentUser.faceDescriptor) {
+    const enrolledDescriptor = normalizeFaceDescriptor(currentUser.faceDescriptor);
+    if (!enrolledDescriptor) {
         showToast('Face ID not registered. Please register via Admin > User Management first.', 'warning');
         return;
     }
@@ -1660,12 +1707,14 @@ async function startAttendanceScanner() {
 
             if (detections.length > 0) {
                 const detection = detections[0];
-                const confidence = detection.detection.score;
+                const detectionScore = detection.detection.score;
+                const distance = getDescriptorMatchDistance(detection.descriptor, enrolledDescriptor);
+                const confidence = descriptorDistanceToConfidence(distance);
                 
                 if (hudScore) hudScore.textContent = `SCORE: ${Math.round(confidence * 100)}%`;
-                if (hudAlign) hudAlign.textContent = `ALIGN: CENTERED`;
+                if (hudAlign) hudAlign.textContent = `ALIGN: ${distance <= ENTERPRISE_CONFIG.FACE.THRESHOLD ? 'VERIFIED' : 'MISMATCH'}`;
 
-                if (confidence > 0.7) {
+                if (detectionScore > 0.7 && distance <= ENTERPRISE_CONFIG.FACE.THRESHOLD) {
                     // Face detected with good confidence - mark attendance
                     clearInterval(attendanceFaceInterval);
                     attendanceFaceInterval = null;
@@ -1737,7 +1786,8 @@ function stopAttendanceScanner() {
 }
 
 async function testFaceVerification() {
-    if (!currentUser.faceDescriptor) {
+    const enrolledDescriptor = normalizeFaceDescriptor(currentUser.faceDescriptor);
+    if (!enrolledDescriptor) {
         showToast('Face ID not registered. Please contact administrator.', 'warning');
         return;
     }
@@ -1759,14 +1809,24 @@ async function testFaceVerification() {
         // Wait a moment for camera to warm up
         await new Promise(r => setTimeout(r, 1000));
         
-        const detections = await faceapi.detectAllFaces(video, new faceapi.TinyFaceDetectorOptions());
+        const detections = await faceapi
+            .detectAllFaces(video, new faceapi.TinyFaceDetectorOptions())
+            .withFaceLandmarks()
+            .withFaceDescriptors();
         
         stream.getTracks().forEach(t => t.stop());
         video.srcObject = null;
         
         if (detections.length > 0) {
-            updateAttendanceScannerStatus('Test Passed', false);
-            showToast(`Face verification test passed! Confidence: ${Math.round(detections[0].score * 100)}%`, 'success');
+            const distance = getDescriptorMatchDistance(detections[0].descriptor, enrolledDescriptor);
+            const confidence = descriptorDistanceToConfidence(distance);
+            if (distance <= ENTERPRISE_CONFIG.FACE.THRESHOLD) {
+                updateAttendanceScannerStatus('Test Passed', false);
+                showToast(`Face verification test passed! Confidence: ${Math.round(confidence * 100)}%`, 'success');
+            } else {
+                updateAttendanceScannerStatus('Face Mismatch', false);
+                showToast('Face detected but does not match enrolled biometric profile.', 'warning');
+            }
         } else {
             updateAttendanceScannerStatus('No Face Found', false);
             showToast('No face detected. Try better lighting or positioning.', 'warning');
@@ -2430,6 +2490,33 @@ function openFaceRegistration(userId) {
     openModal('faceRegistrationModal');
 }
 
+async function ensureRegistrationCamera() {
+    const video = document.getElementById('regVideo');
+    if (!video) return false;
+    if (!registrationStream) {
+        registrationStream = await navigator.mediaDevices.getUserMedia({
+            video: { width: 640, height: 480, facingMode: 'user' }
+        });
+    }
+    video.srcObject = registrationStream;
+    await video.play();
+    return true;
+}
+
+function stopRegistrationCamera() {
+    if (registrationStream) {
+        registrationStream.getTracks().forEach(track => track.stop());
+        registrationStream = null;
+    }
+    const video = document.getElementById('regVideo');
+    if (video) video.srcObject = null;
+    const canvas = document.getElementById('regCanvas');
+    if (canvas) {
+        const ctx = canvas.getContext('2d');
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+    }
+}
+
 function startRegistrationProcess() {
     if (!registrationUserId) {
         showToast('Select a user to register', 'warning');
@@ -2437,36 +2524,108 @@ function startRegistrationProcess() {
     }
     if (registrationInterval) return;
 
-    const totalSamples = ENTERPRISE_CONFIG.FACE.REG_FRAMES;
-    updateRegistrationUI('Capturing', 0);
-    document.getElementById('btnStartReg').classList.add('hidden');
-    document.getElementById('btnStopReg').classList.remove('hidden');
-
-    registrationInterval = setInterval(() => {
-        registrationSamples += 1;
-        const progress = Math.min(100, Math.round((registrationSamples / totalSamples) * 100));
-        updateRegistrationUI('Capturing', progress);
-
-        if (registrationSamples >= totalSamples) {
-            finalizeFaceRegistration();
+    (async () => {
+        const modelsReady = await loadFaceApiModels();
+        if (!modelsReady) {
+            updateRegistrationUI('Model Error', 0);
+            return;
         }
-    }, 140);
+        try {
+            await ensureRegistrationCamera();
+        } catch (err) {
+            showToast('Cannot access registration camera. Please allow permissions.', 'error');
+            updateRegistrationUI('Camera Error', 0);
+            return;
+        }
+
+        const totalSamples = ENTERPRISE_CONFIG.FACE.REG_FRAMES;
+        registrationSamples = 0;
+        registrationDescriptorSamples = [];
+        updateRegistrationUI('Capturing', 0);
+        document.getElementById('btnStartReg').classList.add('hidden');
+        document.getElementById('btnStopReg').classList.remove('hidden');
+
+        const video = document.getElementById('regVideo');
+        const canvas = document.getElementById('regCanvas');
+        const size = { width: video.videoWidth || 640, height: video.videoHeight || 480 };
+        if (canvas) {
+            canvas.width = size.width;
+            canvas.height = size.height;
+            faceapi.matchDimensions(canvas, size);
+        }
+
+        registrationInterval = setInterval(async () => {
+            if (registrationProcessingFrame) return;
+            registrationProcessingFrame = true;
+            try {
+                const detection = await faceapi
+                    .detectSingleFace(video, new faceapi.TinyFaceDetectorOptions())
+                    .withFaceLandmarks()
+                    .withFaceDescriptor();
+
+                if (canvas) {
+                    const ctx = canvas.getContext('2d');
+                    ctx.clearRect(0, 0, canvas.width, canvas.height);
+                    if (detection) {
+                        const resized = faceapi.resizeResults(detection, size);
+                        faceapi.draw.drawDetections(canvas, resized);
+                        faceapi.draw.drawFaceLandmarks(canvas, resized);
+                    }
+                }
+
+                const regHudAlign = document.getElementById('regHudAlign');
+                if (!detection || detection.detection.score < 0.75) {
+                    if (regHudAlign) regHudAlign.textContent = 'ALIGN: NO FACE';
+                    return;
+                }
+
+                registrationDescriptorSamples.push(Array.from(detection.descriptor));
+                registrationSamples += 1;
+                if (regHudAlign) regHudAlign.textContent = 'ALIGN: GOOD';
+
+                const progress = Math.min(100, Math.round((registrationSamples / totalSamples) * 100));
+                updateRegistrationUI('Capturing', progress);
+
+                if (registrationSamples >= totalSamples) {
+                    finalizeFaceRegistration();
+                }
+            } catch (err) {
+                console.error('Registration detection error:', err);
+            } finally {
+                registrationProcessingFrame = false;
+            }
+        }, 220);
+    })();
 }
 
-function stopRegistrationProcess() {
+function stopRegistrationProcess(options = {}) {
+    const { silent = false, status = 'Cancelled' } = options;
     if (registrationInterval) {
         clearInterval(registrationInterval);
         registrationInterval = null;
     }
     registrationSamples = 0;
-    updateRegistrationUI('Cancelled', 0);
+    registrationDescriptorSamples = [];
+    registrationProcessingFrame = false;
+    updateRegistrationUI(status, 0);
     document.getElementById('btnStartReg').classList.remove('hidden');
     document.getElementById('btnStopReg').classList.add('hidden');
-    showToast('Face registration cancelled', 'warning');
+    stopRegistrationCamera();
+    if (!silent) {
+        showToast('Face registration cancelled', 'warning');
+    }
 }
 
-function testRegistrationCamera() {
-    showToast('Camera diagnostics passed', 'success');
+async function testRegistrationCamera() {
+    try {
+        const modelsReady = await loadFaceApiModels();
+        if (!modelsReady) return;
+        await ensureRegistrationCamera();
+        const detection = await faceapi.detectSingleFace(document.getElementById('regVideo'), new faceapi.TinyFaceDetectorOptions());
+        showToast(detection ? 'Camera diagnostics passed' : 'Camera active, but no face detected yet', detection ? 'success' : 'info');
+    } catch (err) {
+        showToast('Camera diagnostics failed: ' + err.message, 'error');
+    }
 }
 
 function updateRegistrationUI(status, progress) {
@@ -2489,12 +2648,32 @@ function finalizeFaceRegistration() {
         registrationInterval = null;
     }
 
+    if (!registrationDescriptorSamples.length) {
+        showToast('No valid face samples captured. Please retry registration.', 'warning');
+        stopRegistrationProcess({ silent: true, status: 'Idle' });
+        return;
+    }
+
+    const descriptorLength = registrationDescriptorSamples[0].length;
+    const averagedDescriptor = new Array(descriptorLength).fill(0);
+    registrationDescriptorSamples.forEach(sample => {
+        for (let i = 0; i < descriptorLength; i += 1) {
+            averagedDescriptor[i] += sample[i];
+        }
+    });
+    for (let i = 0; i < descriptorLength; i += 1) {
+        averagedDescriptor[i] = averagedDescriptor[i] / registrationDescriptorSamples.length;
+    }
+
     const userIndex = appData.users.findIndex(u => u.id === registrationUserId);
     if (userIndex !== -1) {
-        appData.users[userIndex].faceDescriptor = `face_${registrationUserId}_${Date.now()}`;
+        appData.users[userIndex].faceDescriptor = averagedDescriptor;
         appData.users[userIndex].updatedAt = new Date().toISOString();
     }
     saveAppData();
+    stopRegistrationCamera();
+    registrationDescriptorSamples = [];
+    registrationProcessingFrame = false;
     updateRegistrationUI('Completed', 100);
     document.getElementById('btnStartReg').classList.remove('hidden');
     document.getElementById('btnStopReg').classList.add('hidden');
@@ -3042,6 +3221,9 @@ function closeModal(id) {
     if (modal) {
         modal.classList.remove('open');
         document.body.style.overflow = '';
+    }
+    if (id === 'faceRegistrationModal') {
+        stopRegistrationProcess({ silent: true, status: 'Idle' });
     }
 }
 
