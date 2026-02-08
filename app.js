@@ -2984,7 +2984,7 @@ function initSidebar() {
             e.preventDefault();
             const section = item.getAttribute('data-section');
             showSection(section);
-            document.getElementById('sidebar').classList.remove('mobile-open');
+            closeSidebar();
         });
     });
 }
@@ -3001,10 +3001,33 @@ function toggleUserDropdown() {
     });
 }
 
+function closeSidebar() {
+    const sidebar = document.getElementById('sidebar');
+    const backdrop = document.getElementById('sidebarBackdrop');
+    sidebar?.classList.remove('mobile-open');
+    backdrop?.classList.remove('active');
+    document.body.classList.remove('sidebar-open');
+}
+
 function toggleSidebar() {
     const sidebar = document.getElementById('sidebar');
-    sidebar.classList.toggle('mobile-open');
+    const backdrop = document.getElementById('sidebarBackdrop');
+    const isOpen = sidebar?.classList.toggle('mobile-open');
+    backdrop?.classList.toggle('active', !!isOpen);
+    document.body.classList.toggle('sidebar-open', !!isOpen);
 }
+
+window.addEventListener('resize', () => {
+    if (window.innerWidth > 1024) {
+        closeSidebar();
+    }
+});
+
+document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') {
+        closeSidebar();
+    }
+});
 
 function openModal(id) {
     const modal = document.getElementById(id);
