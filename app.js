@@ -1894,6 +1894,10 @@ function updateAttendanceFaceStatus() {
     statusWrap.innerHTML = registered
         ? `<span class="badge badge-success"><i class="fas fa-user-check"></i> Face ID Registered</span>`
         : `<span class="badge badge-warning"><i class="fas fa-user-shield"></i> Face ID Not Registered</span>`;
+    const manageFaceBtn = document.getElementById('manageFaceBtn');
+    if (manageFaceBtn) {
+        manageFaceBtn.textContent = registered ? 'Re-register Face' : 'Register My Face';
+    }
 }
 
 function loadAttendanceHistory() {
@@ -2669,6 +2673,11 @@ function finalizeFaceRegistration() {
     if (userIndex !== -1) {
         appData.users[userIndex].faceDescriptor = averagedDescriptor;
         appData.users[userIndex].updatedAt = new Date().toISOString();
+        // Update currentUser if registering self
+        if (registrationUserId === currentUser.id) {
+            currentUser.faceDescriptor = averagedDescriptor;
+            sessionStorage.setItem('currentUser', JSON.stringify(currentUser));
+        }
     }
     saveAppData();
     stopRegistrationCamera();
@@ -2677,8 +2686,8 @@ function finalizeFaceRegistration() {
     updateRegistrationUI('Completed', 100);
     document.getElementById('btnStartReg').classList.remove('hidden');
     document.getElementById('btnStopReg').classList.add('hidden');
-    showToast('Face registration completed', 'success');
-    loadAdminUsers();
+    showToast('Face registration completed successfully!', 'success');
+    if (currentUser.role === 'admin') loadAdminUsers();
     updateAttendanceFaceStatus();
 }
 
@@ -3152,6 +3161,9 @@ function loadSectionData(sectionId) {
         case 'adminMaterials':
             loadAdminMaterials();
             break;
+        case 'settings':
+            loadSettings();
+            break;
     }
 }
 
@@ -3400,7 +3412,71 @@ function setupEventListeners() {
 }
 
 // =========================================
-// 16. MISSING PROJECT & LEADERBOARD FUNCTIONS
+// 16. SETTINGS & PASSWORD CHANGE
+// =========================================
+function loadSettings() {
+    if (!currentUser) return;
+    document.getElementById('settingsAvatar').textContent = currentUser.name.charAt(0).toUpperCase();
+    document.getElementById('settingsName').textContent = currentUser.name;
+    document.getElementById('settingsEmail').textContent = currentUser.email || 'No email';
+    document.getElementById('settingsRole').textContent = currentUser.role.toUpperCase();
+    document.getElementById('settingsUsername').textContent = currentUser.username;
+    const course = appData.courses.find(c => c.id == currentUser.courseId);
+    document.getElementById('settingsCourse').textContent = course ? course.name : 'None';
+    document.getElementById('settingsFaceStatus').textContent = currentUser.faceDescriptor ? 'Registered' : 'Not Registered';
+    const form = document.getElementById('changePasswordForm');
+    if (form) form.reset();
+}
+
+function handleChangePassword(e) {
+    e.preventDefault();
+    const currentPwd = document.getElementById('currentPassword').value;
+    const newPwd = document.getElementById('newPassword').value;
+    const confirmPwd = document.getElementById('confirmNewPassword').value;
+
+    if (!currentPwd || !newPwd || !confirmPwd) {
+        showToast('Please fill all password fields', 'error');
+        return;
+    }
+
+    if (currentPwd !== currentUser.password) {
+        showToast('Current password is incorrect', 'error');
+        return;
+    }
+
+    if (newPwd.length < 8) {
+        showToast('New password must be at least 8 characters', 'error');
+        return;
+    }
+
+    if (newPwd !== confirmPwd) {
+        showToast('New passwords do not match', 'error');
+        return;
+    }
+
+    if (newPwd === currentPwd) {
+        showToast('New password must be different from current password', 'warning');
+        return;
+    }
+
+    const userIndex = appData.users.findIndex(u => u.id === currentUser.id);
+    if (userIndex > -1) {
+        appData.users[userIndex].password = newPwd;
+        currentUser.password = newPwd;
+        sessionStorage.setItem('currentUser', JSON.stringify(currentUser));
+        saveAppData();
+        showToast('Password changed successfully!', 'success');
+        logSystem('PASSWORD_CHANGE', 'User changed password', currentUser.id);
+        document.getElementById('changePasswordForm').reset();
+    }
+}
+
+function openSelfFaceRegistration() {
+    openFaceRegistration(currentUser.id);
+}
+
+// =========================================
+// 17. MISSING PROJECT & LEADERBOARD FUNCTIONS
 // =========================================
 function viewProject(projectId) {
     const project = appData.projects.find(p => p.id === projectId);
