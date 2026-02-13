@@ -1,5 +1,6 @@
 {
   "dependencies": {
+    "build:dev": "vite build --mode development"
     "@supabase/supabase-js": "^2.95.3",
     "@types/react": "^18.3.28",
     "@types/react-dom": "^18.3.7",
