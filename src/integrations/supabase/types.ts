@@ -14,7 +14,348 @@ export type Database = {
   }
   public: {
     Tables: {
-      [_ in never]: never
+      attendance: {
+        Row: {
+          confidence: number | null
+          course_id: number | null
+          created_at: string
+          date: string
+          id: string
+          lat: number | null
+          lng: number | null
+          method: string | null
+          notes: string | null
+          status: string
+          time: string
+          user_id: string | null
+          verified: boolean | null
+        }
+        Insert: {
+          confidence?: number | null
+          course_id?: number | null
+          created_at?: string
+          date?: string
+          id?: string
+          lat?: number | null
+          lng?: number | null
+          method?: string | null
+          notes?: string | null
+          status?: string
+          time?: string
+          user_id?: string | null
+          verified?: boolean | null
+        }
+        Update: {
+          confidence?: number | null
+          course_id?: number | null
+          created_at?: string
+          date?: string
+          id?: string
+          lat?: number | null
+          lng?: number | null
+          method?: string | null
+          notes?: string | null
+          status?: string
+          time?: string
+          user_id?: string | null
+          verified?: boolean | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "attendance_course_id_fkey"
+            columns: ["course_id"]
+            isOneToOne: false
+            referencedRelation: "courses"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "attendance_user_id_fkey"
+            columns: ["user_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      courses: {
+        Row: {
+          code: string
+          created_at: string
+          credits: number | null
+          description: string | null
+          id: number
+          lecturer: string | null
+          name: string
+          schedule: string | null
+          students: string[] | null
+          updated_at: string
+        }
+        Insert: {
+          code: string
+          created_at?: string
+          credits?: number | null
+          description?: string | null
+          id?: number
+          lecturer?: string | null
+          name: string
+          schedule?: string | null
+          students?: string[] | null
+          updated_at?: string
+        }
+        Update: {
+          code?: string
+          created_at?: string
+          credits?: number | null
+          description?: string | null
+          id?: number
+          lecturer?: string | null
+          name?: string
+          schedule?: string | null
+          students?: string[] | null
+          updated_at?: string
+        }
+        Relationships: []
+      }
+      group_messages: {
+        Row: {
+          content: string
+          created_at: string
+          group_id: string | null
+          id: string
+          user_id: string | null
+        }
+        Insert: {
+          content: string
+          created_at?: string
+          group_id?: string | null
+          id?: string
+          user_id?: string | null
+        }
+        Update: {
+          content?: string
+          created_at?: string
+          group_id?: string | null
+          id?: string
+          user_id?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "group_messages_group_id_fkey"
+            columns: ["group_id"]
+            isOneToOne: false
+            referencedRelation: "groups"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "group_messages_user_id_fkey"
+            columns: ["user_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      groups: {
+        Row: {
+          created_at: string
+          created_by: string | null
+          description: string | null
+          id: string
+          member_ids: string[] | null
+          name: string
+          updated_at: string
+        }
+        Insert: {
+          created_at?: string
+          created_by?: string | null
+          description?: string | null
+          id?: string
+          member_ids?: string[] | null
+          name: string
+          updated_at?: string
+        }
+        Update: {
+          created_at?: string
+          created_by?: string | null
+          description?: string | null
+          id?: string
+          member_ids?: string[] | null
+          name?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "groups_created_by_fkey"
+            columns: ["created_by"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      materials: {
+        Row: {
+          author: string | null
+          content: string | null
+          course_id: number | null
+          created_at: string
+          description: string | null
+          downloads: number | null
+          file_size: string | null
+          id: number
+          language: string | null
+          tags: string[] | null
+          title: string
+          type: string
+        }
+        Insert: {
+          author?: string | null
+          content?: string | null
+          course_id?: number | null
+          created_at?: string
+          description?: string | null
+          downloads?: number | null
+          file_size?: string | null
+          id?: number
+          language?: string | null
+          tags?: string[] | null
+          title: string
+          type?: string
+        }
+        Update: {
+          author?: string | null
+          content?: string | null
+          course_id?: number | null
+          created_at?: string
+          description?: string | null
+          downloads?: number | null
+          file_size?: string | null
+          id?: number
+          language?: string | null
+          tags?: string[] | null
+          title?: string
+          type?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "materials_course_id_fkey"
+            columns: ["course_id"]
+            isOneToOne: false
+            referencedRelation: "courses"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      profiles: {
+        Row: {
+          course_id: number | null
+          created_at: string
+          email: string | null
+          face_descriptor: Json | null
+          id: string
+          last_login: string | null
+          liked_projects: string[] | null
+          name: string
+          notes: string | null
+          password_hash: string
+          preferences: Json | null
+          role: string
+          status: string
+          updated_at: string
+          username: string
+        }
+        Insert: {
+          course_id?: number | null
+          created_at?: string
+          email?: string | null
+          face_descriptor?: Json | null
+          id?: string
+          last_login?: string | null
+          liked_projects?: string[] | null
+          name: string
+          notes?: string | null
+          password_hash: string
+          preferences?: Json | null
+          role?: string
+          status?: string
+          updated_at?: string
+          username: string
+        }
+        Update: {
+          course_id?: number | null
+          created_at?: string
+          email?: string | null
+          face_descriptor?: Json | null
+          id?: string
+          last_login?: string | null
+          liked_projects?: string[] | null
+          name?: string
+          notes?: string | null
+          password_hash?: string
+          preferences?: Json | null
+          role?: string
+          status?: string
+          updated_at?: string
+          username?: string
+        }
+        Relationships: []
+      }
+      projects: {
+        Row: {
+          category: string | null
+          code: string | null
+          created_at: string
+          description: string | null
+          forks: number | null
+          id: string
+          likes: number | null
+          name: string
+          tags: string[] | null
+          updated_at: string
+          user_id: string | null
+          views: number | null
+          visibility: string | null
+        }
+        Insert: {
+          category?: string | null
+          code?: string | null
+          created_at?: string
+          description?: string | null
+          forks?: number | null
+          id?: string
+          likes?: number | null
+          name: string
+          tags?: string[] | null
+          updated_at?: string
+          user_id?: string | null
+          views?: number | null
+          visibility?: string | null
+        }
+        Update: {
+          category?: string | null
+          code?: string | null
+          created_at?: string
+          description?: string | null
+          forks?: number | null
+          id?: string
+          likes?: number | null
+          name?: string
+          tags?: string[] | null
+          updated_at?: string
+          user_id?: string | null
+          views?: number | null
+          visibility?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "projects_user_id_fkey"
+            columns: ["user_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
     }
     Views: {
       [_ in never]: never
