@@ -86,6 +86,10 @@ function doPost(e) {
       .setMimeType(ContentService.MimeType.JSON);
   }
 
+  // Optional explicit conflict response format:
+  // return ContentService.createTextOutput(JSON.stringify({ ok: false, error: 'conflict' }))
+  //   .setMimeType(ContentService.MimeType.JSON);
+
   return ContentService
     .createTextOutput(JSON.stringify({ ok: false, error: 'Invalid payload' }))
     .setMimeType(ContentService.MimeType.JSON);
@@ -119,3 +123,4 @@ window.FERRETTO_GOOGLE_SHEETS_URL = "https://docs.google.com/spreadsheets/d/1C8l
 ## Notes
 
 - Face recognition support references `face-api.js` via CDN in `index.html`.
+- If your Apps Script returns `{ ok: false, error: "conflict" }`, the app now detects that and treats it as a failed cloud write instead of silently assuming success.

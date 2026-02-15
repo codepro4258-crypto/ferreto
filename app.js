@@ -130,6 +130,9 @@ async function fetchRemoteAppData() {
     }
 
     const payload = await response.json();
+    if (payload && payload.ok === false) {
+        throw new Error(payload.error || 'Remote load rejected request');
+    }
     return payload?.data || payload || null;
 }
 
@@ -152,6 +155,11 @@ async function pushRemoteAppData() {
         throw new Error(`Remote save failed (${response.status})`);
     }
 
+    const payload = await response.json().catch(() => ({}));
+    if (payload && payload.ok === false) {
+        throw new Error(payload.error || 'Remote save rejected request');
+    }
+
     return true;
 }
 
@@ -166,7 +174,7 @@ function queueRemoteSave() {
             await pushRemoteAppData();
         } catch (error) {
             console.error('Google Sheets sync save failed:', error);
-            showToast('Cloud sync failed. Data saved locally.', 'warning');
+            showToast('Cloud sync failed (possible server conflict). Data saved locally.', 'warning');
         } finally {
             remoteSaveInProgress = false;
         }
@@ -250,7 +258,7 @@ async function saveAppDataTwoPhase(previousData) {
             appData = deepCloneData(previousData);
             localStorage.setItem('ferretto_edu_pro_data', JSON.stringify(appData));
         }
-        showToast('Cloud sync failed. Change reverted to keep all devices consistent.', 'error');
+        showToast('Cloud sync conflict/failure. Change reverted to keep all devices consistent.', 'error');
         return false;
     }
 }
