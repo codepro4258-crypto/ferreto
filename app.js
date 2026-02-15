@@ -33,6 +33,14 @@ const ENTERPRISE_CONFIG = {
     ENABLE_BACKUP: true
 };
 
+const CLOUD_SYNC_CONFIG = {
+    STORAGE_KEY: 'ferretto_google_sheets_web_app_url',
+    SHEET_ID_KEY: 'ferretto_google_sheet_id',
+    WEB_APP_URL: window.FERRETTO_GOOGLE_SHEETS_WEB_APP_URL || '',
+    GOOGLE_SHEET_URL: window.FERRETTO_GOOGLE_SHEETS_URL || 'https://docs.google.com/spreadsheets/d/1C8lKTDgcNd_6RdZYmtwC-dVlDMCvqx56QsgSzL9iMcE/edit?usp=sharing',
+    SAVE_DEBOUNCE_MS: 600
+};
+
 // =========================================
 // 2. GLOBAL VARIABLES
 // =========================================
@@ -53,12 +61,15 @@ let attendanceScanInterval = null;
 let registrationStream = null;
 let registrationDescriptorSamples = [];
 let registrationProcessingFrame = false;
+let remoteSaveTimeout = null;
+let remoteSaveInProgress = false;
 
 // =========================================
 // 3. INITIALIZATION
 // =========================================
-function initializeApp() {
-    loadAppData();
+async function initializeApp() {
+    initializeCloudSheetConfig();
+    await loadAppData();
     checkAuth();
     setupEventListeners();
     initGeolocation();
@@ -71,13 +82,120 @@ function initializeApp() {
     `);
 }
 
-function loadAppData() {
+function getRemoteDbUrl() {
+    return (localStorage.getItem(CLOUD_SYNC_CONFIG.STORAGE_KEY) || CLOUD_SYNC_CONFIG.WEB_APP_URL || '').trim();
+}
+
+function hasRemoteDb() {
+    return Boolean(getRemoteDbUrl());
+}
+
+function getSheetIdFromUrl(url) {
+    if (!url) return '';
+    const match = String(url).match(/\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/);
+    return match ? match[1] : '';
+}
+
+function getGoogleSheetId() {
+    const stored = (localStorage.getItem(CLOUD_SYNC_CONFIG.SHEET_ID_KEY) || '').trim();
+    if (stored) return stored;
+
+    const fromWindow = getSheetIdFromUrl(CLOUD_SYNC_CONFIG.GOOGLE_SHEET_URL);
+    if (fromWindow) {
+        localStorage.setItem(CLOUD_SYNC_CONFIG.SHEET_ID_KEY, fromWindow);
+    }
+    return fromWindow;
+}
+
+function initializeCloudSheetConfig() {
+    const configuredId = getGoogleSheetId();
+    if (configuredId) return;
+
+    const fallbackId = getSheetIdFromUrl(CLOUD_SYNC_CONFIG.GOOGLE_SHEET_URL);
+    if (fallbackId) {
+        localStorage.setItem(CLOUD_SYNC_CONFIG.SHEET_ID_KEY, fallbackId);
+    }
+}
+
+async function fetchRemoteAppData() {
+    const remoteUrl = getRemoteDbUrl();
+    if (!remoteUrl) return null;
+
+    const sheetId = getGoogleSheetId();
+    const baseQuery = `action=load${sheetId ? `&sheetId=${encodeURIComponent(sheetId)}` : ''}`;
+    const requestUrl = `${remoteUrl}${remoteUrl.includes('?') ? '&' : '?'}${baseQuery}`;
+    const response = await fetch(requestUrl, { method: 'GET' });
+    if (!response.ok) {
+        throw new Error(`Remote load failed (${response.status})`);
+    }
+
+    const payload = await response.json();
+    return payload?.data || payload || null;
+}
+
+async function pushRemoteAppData() {
+    const remoteUrl = getRemoteDbUrl();
+    if (!remoteUrl) return true;
+
+    const response = await fetch(remoteUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            action: 'save',
+            sheetId: getGoogleSheetId() || undefined,
+            updatedAt: new Date().toISOString(),
+            data: appData
+        })
+    });
+
+    if (!response.ok) {
+        throw new Error(`Remote save failed (${response.status})`);
+    }
+
+    return true;
+}
+
+function queueRemoteSave() {
+    if (!hasRemoteDb()) return;
+    if (remoteSaveTimeout) clearTimeout(remoteSaveTimeout);
+
+    remoteSaveTimeout = setTimeout(async () => {
+        if (remoteSaveInProgress) return;
+        remoteSaveInProgress = true;
+        try {
+            await pushRemoteAppData();
+        } catch (error) {
+            console.error('Google Sheets sync save failed:', error);
+            showToast('Cloud sync failed. Data saved locally.', 'warning');
+        } finally {
+            remoteSaveInProgress = false;
+        }
+    }, CLOUD_SYNC_CONFIG.SAVE_DEBOUNCE_MS);
+}
+
+async function loadAppData() {
     try {
+        if (hasRemoteDb()) {
+            try {
+                const remoteData = await fetchRemoteAppData();
+                if (remoteData && typeof remoteData === 'object') {
+                    appData = remoteData;
+                    ensureDataIntegrity();
+                    localStorage.setItem('ferretto_edu_pro_data', JSON.stringify(appData));
+                    console.log('Loaded cloud data from Google Sheets');
+                    return;
+                }
+            } catch (error) {
+                console.error('Google Sheets sync load failed. Falling back to local data:', error);
+            }
+        }
+
         const stored = localStorage.getItem('ferretto_edu_pro_data');
         if (!stored) {
             // Create default data
             appData = getDefaultData();
             localStorage.setItem('ferretto_edu_pro_data', JSON.stringify(appData));
+            queueRemoteSave();
             console.log("Initialized with default data");
         } else {
             appData = JSON.parse(stored);
@@ -93,10 +211,46 @@ function loadAppData() {
 function saveAppData() {
     try {
         localStorage.setItem('ferretto_edu_pro_data', JSON.stringify(appData));
+        queueRemoteSave();
         return true;
     } catch (error) {
         console.error("Failed to save app data:", error);
         showToast("Failed to save data", "error");
+        return false;
+    }
+}
+
+function generateGlobalId() {
+    const timestamp = Date.now() * 1000;
+    const randomPart = Math.floor(Math.random() * 1000);
+    return timestamp + randomPart;
+}
+
+function deepCloneData(data) {
+    if (typeof structuredClone === 'function') {
+        return structuredClone(data);
+    }
+
+    return JSON.parse(JSON.stringify(data));
+}
+
+async function saveAppDataTwoPhase(previousData) {
+    const localOk = saveAppData();
+    if (!localOk) return false;
+
+    if (!hasRemoteDb()) return true;
+
+    try {
+        await pushRemoteAppData();
+        showToast('Cloud sync successful', 'success');
+        return true;
+    } catch (error) {
+        console.error('Immediate cloud sync failed:', error);
+        if (previousData) {
+            appData = deepCloneData(previousData);
+            localStorage.setItem('ferretto_edu_pro_data', JSON.stringify(appData));
+        }
+        showToast('Cloud sync failed. Change reverted to keep all devices consistent.', 'error');
         return false;
     }
 }
@@ -1127,7 +1281,7 @@ function handleSaveMaterial(e) {
     } else {
         // Create new material
         const newMaterial = {
-            id: Date.now(),
+            id: generateGlobalId(),
             courseId,
             title,
             type,
@@ -1402,7 +1556,7 @@ function handleSaveProject(e) {
     const code = mainEditor.getValue();
     
     const newProject = {
-        id: Date.now(),
+        id: generateGlobalId(),
         userId: currentUser.id,
         name,
         description,
@@ -1844,7 +1998,7 @@ function markAttendanceSuccess(coords, confidence) {
     const timeStr = now.toTimeString().split(' ')[0];
     
     const attendanceRecord = {
-        id: Date.now(),
+        id: generateGlobalId(),
         userId: currentUser.id,
         courseId: currentUser.courseId,
         date: dateStr,
@@ -2041,14 +2195,14 @@ function loadAdminUsers() {
                 <td class="text-sm text-gray">${lastLogin}</td>
                 <td>
                     <div class="flex gap-1">
-                        <button class="btn btn-sm btn-secondary" onclick="openFaceRegistration(${u.id})" title="Register Face">
+                        <button class="btn btn-sm btn-secondary" onclick="openFaceRegistration(${JSON.stringify(u.id)})" title="Register Face">
                             <i class="fas fa-user-shield"></i>
                         </button>
-                        <button class="btn btn-sm btn-outline" onclick="editUser(${u.id})">
+                        <button class="btn btn-sm btn-outline" onclick="editUser(${JSON.stringify(u.id)})">
                             <i class="fas fa-edit"></i>
                         </button>
-                        ${u.id !== currentUser.id ? `
-                        <button class="btn btn-sm btn-danger" onclick="deleteUser(${u.id})">
+                        ${String(u.id) !== String(currentUser.id) ? `
+                        <button class="btn btn-sm btn-danger" onclick="deleteUser(${JSON.stringify(u.id)})">
                             <i class="fas fa-trash"></i>
                         </button>
                         ` : `
@@ -2223,7 +2377,7 @@ function editUser(userId) {
     openModal('userModal');
 }
 
-function handleSaveUser(e) {
+async function handleSaveUser(e) {
     e.preventDefault();
     const userId = document.getElementById('userId').value;
     const name = document.getElementById('userNameInput').value.trim();
@@ -2251,6 +2405,10 @@ function handleSaveUser(e) {
         return;
     }
 
+    const previousData = deepCloneData(appData);
+    let shouldRefreshSession = false;
+    let updatedCurrentUser = null;
+
     if (userId) {
         const userIndex = appData.users.findIndex(u => String(u.id) === String(userId));
         if (userIndex === -1) return;
@@ -2268,16 +2426,14 @@ function handleSaveUser(e) {
         };
         appData.users[userIndex] = updatedUser;
         syncCourseMembership(existing.id, oldCourseId, courseId ? Number(courseId) : null);
-        if (currentUser && currentUser.id === updatedUser.id) {
-            currentUser = { ...updatedUser };
-            sessionStorage.setItem('currentUser', JSON.stringify(currentUser));
-            showDashboard();
+
+        if (currentUser && String(currentUser.id) === String(updatedUser.id)) {
+            shouldRefreshSession = true;
+            updatedCurrentUser = { ...updatedUser };
         }
-        showToast('User updated successfully', 'success');
-        logSystem('USER_UPDATE', `Updated user: ${name}`, currentUser.id);
     } else {
         const newUser = {
-            id: Date.now(),
+            id: generateGlobalId(),
             username,
             password,
             email,
@@ -2294,33 +2450,54 @@ function handleSaveUser(e) {
         };
         appData.users.push(newUser);
         syncCourseMembership(newUser.id, null, newUser.courseId);
-        showToast('User created successfully', 'success');
-        logSystem('USER_CREATE', `Created user: ${name}`, currentUser.id);
     }
 
-    saveAppData();
+    const synced = await saveAppDataTwoPhase(previousData);
+    if (!synced) {
+        loadAdminUsers();
+        refreshDashboard();
+        return;
+    }
+
+    if (shouldRefreshSession && updatedCurrentUser) {
+        currentUser = updatedCurrentUser;
+        sessionStorage.setItem('currentUser', JSON.stringify(currentUser));
+        showDashboard();
+    }
+
+    showToast(userId ? 'User updated successfully (Phase 1 local + Phase 2 cloud)' : 'User created successfully (Phase 1 local + Phase 2 cloud)', 'success');
+    logSystem(userId ? 'USER_UPDATE' : 'USER_CREATE', `${userId ? 'Updated' : 'Created'} user: ${name}`, currentUser.id);
+
     closeModal('userModal');
     loadAdminUsers();
     refreshDashboard();
 }
 
-function deleteUser(userId) {
-    const user = appData.users.find(u => u.id === userId);
+async function deleteUser(userId) {
+    const user = appData.users.find(u => String(u.id) === String(userId));
     if (!user) return;
     if (!confirm(`Delete user ${user.name}? This action cannot be undone.`)) return;
 
-    appData.users = appData.users.filter(u => u.id !== userId);
-    appData.attendance = appData.attendance.filter(a => a.userId !== userId);
-    appData.projects = appData.projects.filter(p => p.userId !== userId);
-    appData.groupMessages = appData.groupMessages.filter(m => m.userId !== userId);
+    const previousData = deepCloneData(appData);
+
+    appData.users = appData.users.filter(u => String(u.id) !== String(userId));
+    appData.attendance = appData.attendance.filter(a => String(a.userId) !== String(userId));
+    appData.projects = appData.projects.filter(p => String(p.userId) !== String(userId));
+    appData.groupMessages = appData.groupMessages.filter(m => String(m.userId) !== String(userId));
     appData.groups = appData.groups.map(group => ({
         ...group,
-        memberIds: group.memberIds.filter(id => id !== userId)
+        memberIds: group.memberIds.filter(id => String(id) !== String(userId))
     }));
     syncCourseMembership(userId, user.courseId, null);
 
-    saveAppData();
-    showToast('User deleted successfully', 'success');
+    const synced = await saveAppDataTwoPhase(previousData);
+    if (!synced) {
+        loadAdminUsers();
+        refreshDashboard();
+        return;
+    }
+
+    showToast('User deleted successfully (Phase 1 local + Phase 2 cloud)', 'success');
     logSystem('USER_DELETE', `Deleted user: ${user.name}`, currentUser.id);
     loadAdminUsers();
     refreshDashboard();
@@ -2408,7 +2585,7 @@ function handleSaveCourse(e) {
         logSystem('COURSE_UPDATE', `Updated course: ${code}`, currentUser.id);
     } else {
         appData.courses.push({
-            id: Date.now(),
+            id: generateGlobalId(),
             code,
             name,
             lecturer,
@@ -2846,7 +3023,7 @@ function sendGroupMessage() {
     }
 
     appData.groupMessages.push({
-        id: Date.now(),
+        id: generateGlobalId(),
         groupId: group.id,
         userId: currentUser.id,
         content: message,
@@ -2895,7 +3072,7 @@ function handleSaveGroup(e) {
         logSystem('GROUP_UPDATE', `Updated group: ${name}`, currentUser.id);
     } else {
         appData.groups.push({
-            id: Date.now(),
+            id: generateGlobalId(),
             name,
             description,
             createdBy: currentUser.id,
@@ -3298,7 +3475,7 @@ function copyToClipboard(text) {
 
 function logSystem(action, details, userId = null) {
     const log = {
-        id: Date.now(),
+        id: generateGlobalId(),
         timestamp: new Date().toISOString(),
         action,
         details,
@@ -3623,7 +3800,7 @@ function forkProject(projectId) {
     if (!project) return;
     
     const forkedProject = {
-        id: Date.now(),
+        id: generateGlobalId(),
         userId: currentUser.id,
         name: `${project.name} (Fork)`,
         description: `Forked from ${project.name}`,
