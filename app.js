@@ -33,6 +33,12 @@ const ENTERPRISE_CONFIG = {
     ENABLE_BACKUP: true
 };
 
+const CLOUD_SYNC_CONFIG = {
+    STORAGE_KEY: 'ferretto_google_sheets_web_app_url',
+    WEB_APP_URL: window.FERRETTO_GOOGLE_SHEETS_WEB_APP_URL || '',
+    SAVE_DEBOUNCE_MS: 600
+};
+
 // =========================================
 // 2. GLOBAL VARIABLES
 // =========================================
@@ -53,12 +59,14 @@ let attendanceScanInterval = null;
 let registrationStream = null;
 let registrationDescriptorSamples = [];
 let registrationProcessingFrame = false;
+let remoteSaveTimeout = null;
+let remoteSaveInProgress = false;
 
 // =========================================
 // 3. INITIALIZATION
 // =========================================
-function initializeApp() {
-    loadAppData();
+async function initializeApp() {
+    await loadAppData();
     checkAuth();
     setupEventListeners();
     initGeolocation();
@@ -71,13 +79,90 @@ function initializeApp() {
     `);
 }
 
-function loadAppData() {
+function getRemoteDbUrl() {
+    return (localStorage.getItem(CLOUD_SYNC_CONFIG.STORAGE_KEY) || CLOUD_SYNC_CONFIG.WEB_APP_URL || '').trim();
+}
+
+function hasRemoteDb() {
+    return Boolean(getRemoteDbUrl());
+}
+
+async function fetchRemoteAppData() {
+    const remoteUrl = getRemoteDbUrl();
+    if (!remoteUrl) return null;
+
+    const requestUrl = `${remoteUrl}${remoteUrl.includes('?') ? '&' : '?'}action=load`;
+    const response = await fetch(requestUrl, { method: 'GET' });
+    if (!response.ok) {
+        throw new Error(`Remote load failed (${response.status})`);
+    }
+
+    const payload = await response.json();
+    return payload?.data || payload || null;
+}
+
+async function pushRemoteAppData() {
+    const remoteUrl = getRemoteDbUrl();
+    if (!remoteUrl) return true;
+
+    const response = await fetch(remoteUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            action: 'save',
+            updatedAt: new Date().toISOString(),
+            data: appData
+        })
+    });
+
+    if (!response.ok) {
+        throw new Error(`Remote save failed (${response.status})`);
+    }
+
+    return true;
+}
+
+function queueRemoteSave() {
+    if (!hasRemoteDb()) return;
+    if (remoteSaveTimeout) clearTimeout(remoteSaveTimeout);
+
+    remoteSaveTimeout = setTimeout(async () => {
+        if (remoteSaveInProgress) return;
+        remoteSaveInProgress = true;
+        try {
+            await pushRemoteAppData();
+        } catch (error) {
+            console.error('Google Sheets sync save failed:', error);
+            showToast('Cloud sync failed. Data saved locally.', 'warning');
+        } finally {
+            remoteSaveInProgress = false;
+        }
+    }, CLOUD_SYNC_CONFIG.SAVE_DEBOUNCE_MS);
+}
+
+async function loadAppData() {
     try {
+        if (hasRemoteDb()) {
+            try {
+                const remoteData = await fetchRemoteAppData();
+                if (remoteData && typeof remoteData === 'object') {
+                    appData = remoteData;
+                    ensureDataIntegrity();
+                    localStorage.setItem('ferretto_edu_pro_data', JSON.stringify(appData));
+                    console.log('Loaded cloud data from Google Sheets');
+                    return;
+                }
+            } catch (error) {
+                console.error('Google Sheets sync load failed. Falling back to local data:', error);
+            }
+        }
+
         const stored = localStorage.getItem('ferretto_edu_pro_data');
         if (!stored) {
             // Create default data
             appData = getDefaultData();
             localStorage.setItem('ferretto_edu_pro_data', JSON.stringify(appData));
+            queueRemoteSave();
             console.log("Initialized with default data");
         } else {
             appData = JSON.parse(stored);
@@ -93,12 +178,21 @@ function loadAppData() {
 function saveAppData() {
     try {
         localStorage.setItem('ferretto_edu_pro_data', JSON.stringify(appData));
+        queueRemoteSave();
         return true;
     } catch (error) {
         console.error("Failed to save app data:", error);
         showToast("Failed to save data", "error");
         return false;
     }
+}
+
+function generateGlobalId(prefix = 'id') {
+    if (typeof crypto !== 'undefined' && crypto.randomUUID) {
+        return `${prefix}_${crypto.randomUUID()}`;
+    }
+
+    return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
 }
 
 function getDefaultData() {
@@ -1127,7 +1221,7 @@ function handleSaveMaterial(e) {
     } else {
         // Create new material
         const newMaterial = {
-            id: Date.now(),
+            id: generateGlobalId(),
             courseId,
             title,
             type,
@@ -1402,7 +1496,7 @@ function handleSaveProject(e) {
     const code = mainEditor.getValue();
     
     const newProject = {
-        id: Date.now(),
+        id: generateGlobalId(),
         userId: currentUser.id,
         name,
         description,
@@ -1844,7 +1938,7 @@ function markAttendanceSuccess(coords, confidence) {
     const timeStr = now.toTimeString().split(' ')[0];
     
     const attendanceRecord = {
-        id: Date.now(),
+        id: generateGlobalId(),
         userId: currentUser.id,
         courseId: currentUser.courseId,
         date: dateStr,
@@ -2277,7 +2371,7 @@ function handleSaveUser(e) {
         logSystem('USER_UPDATE', `Updated user: ${name}`, currentUser.id);
     } else {
         const newUser = {
-            id: Date.now(),
+            id: generateGlobalId(),
             username,
             password,
             email,
@@ -2408,7 +2502,7 @@ function handleSaveCourse(e) {
         logSystem('COURSE_UPDATE', `Updated course: ${code}`, currentUser.id);
     } else {
         appData.courses.push({
-            id: Date.now(),
+            id: generateGlobalId(),
             code,
             name,
             lecturer,
@@ -2846,7 +2940,7 @@ function sendGroupMessage() {
     }
 
     appData.groupMessages.push({
-        id: Date.now(),
+        id: generateGlobalId(),
         groupId: group.id,
         userId: currentUser.id,
         content: message,
@@ -2895,7 +2989,7 @@ function handleSaveGroup(e) {
         logSystem('GROUP_UPDATE', `Updated group: ${name}`, currentUser.id);
     } else {
         appData.groups.push({
-            id: Date.now(),
+            id: generateGlobalId(),
             name,
             description,
             createdBy: currentUser.id,
@@ -3298,7 +3392,7 @@ function copyToClipboard(text) {
 
 function logSystem(action, details, userId = null) {
     const log = {
-        id: Date.now(),
+        id: generateGlobalId(),
         timestamp: new Date().toISOString(),
         action,
         details,
@@ -3623,7 +3717,7 @@ function forkProject(projectId) {
     if (!project) return;
     
     const forkedProject = {
-        id: Date.now(),
+        id: generateGlobalId(),
         userId: currentUser.id,
         name: `${project.name} (Fork)`,
         description: `Forked from ${project.name}`,
