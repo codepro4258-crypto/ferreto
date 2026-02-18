@@ -1430,6 +1430,28 @@ function openPreviewInNewTab() {
     newWindow.document.close();
 }
 
+function formatCode() {
+    if (!materialEditor) {
+        showToast('Code editor is not ready yet', 'warning');
+        return;
+    }
+
+    const formatted = materialEditor.getValue()
+        .split('\n')
+        .map(line => line.trimEnd())
+        .join('\n')
+        .replace(/\n{3,}/g, '\n\n')
+        .trim();
+
+    if (!formatted) {
+        showToast('Nothing to format', 'warning');
+        return;
+    }
+
+    materialEditor.setValue(`${formatted}\n`);
+    showToast('Code formatted', 'success');
+}
+
 function runCode() {
     updatePreview();
     showToast('Code executed successfully', 'success');
@@ -1726,7 +1748,7 @@ async function loadFaceApiModels() {
 async function startAttendanceScanner() {
     const enrolledDescriptor = normalizeFaceDescriptor(currentUser.faceDescriptor);
     if (!enrolledDescriptor) {
-        showToast('Face ID not registered. Please register via Admin > User Management first.', 'warning');
+        showToast('Face ID not registered. Click "Register My Face" before starting attendance.', 'warning');
         return;
     }
     
