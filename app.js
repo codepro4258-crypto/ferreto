@@ -35,8 +35,9 @@ const ENTERPRISE_CONFIG = {
 
 const CLOUD_SYNC_CONFIG = {
     STORAGE_KEY: 'ferretto_google_sheets_web_app_url',
-    WEB_APP_URL: window.FERRETTO_GOOGLE_SHEETS_WEB_APP_URL || '',
-    SAVE_DEBOUNCE_MS: 600
+    WEB_APP_URL: window.FERRETTO_GOOGLE_SHEETS_WEB_APP_URL || 'https://script.google.com/macros/s/AKfycbyHdTj2GOS2l8YJo3nJbwV2j8WUTPrcA0GSsEWNTFHQXbRpUV_ESSPtnReJS-udWIgHug/exec',
+    SAVE_DEBOUNCE_MS: 600,
+    POLL_INTERVAL_MS: 8000
 };
 
 // =========================================
@@ -61,6 +62,7 @@ let registrationDescriptorSamples = [];
 let registrationProcessingFrame = false;
 let remoteSaveTimeout = null;
 let remoteSaveInProgress = false;
+let remotePollInterval = null;
 
 // =========================================
 // 3. INITIALIZATION
@@ -68,6 +70,7 @@ let remoteSaveInProgress = false;
 async function initializeApp() {
     await loadAppData();
     checkAuth();
+    startRemoteSyncPolling();
     setupEventListeners();
     initGeolocation();
     
@@ -98,7 +101,21 @@ async function fetchRemoteAppData() {
     }
 
     const payload = await response.json();
-    return payload?.data || payload || null;
+    const data = payload?.data || payload || null;
+    const updatedAt = payload?.updatedAt || data?.metadata?.lastUpdatedAt || null;
+
+    return { data, updatedAt };
+}
+
+function getDataUpdatedAtMs(data) {
+    const timestamp = data?.metadata?.lastUpdatedAt;
+    const parsed = timestamp ? Date.parse(timestamp) : NaN;
+    return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function touchDataUpdatedAt() {
+    appData.metadata = appData.metadata || {};
+    appData.metadata.lastUpdatedAt = new Date().toISOString();
 }
 
 async function pushRemoteAppData() {
@@ -140,13 +157,59 @@ function queueRemoteSave() {
     }, CLOUD_SYNC_CONFIG.SAVE_DEBOUNCE_MS);
 }
 
+async function syncRemoteIfNewer() {
+    if (!hasRemoteDb() || remoteSaveInProgress) return;
+
+    try {
+        const remotePayload = await fetchRemoteAppData();
+        const remoteData = remotePayload?.data;
+        if (!remoteData || typeof remoteData !== 'object') return;
+
+        const remoteUpdatedAtMs = remotePayload?.updatedAt ? Date.parse(remotePayload.updatedAt) : getDataUpdatedAtMs(remoteData);
+        const localUpdatedAtMs = getDataUpdatedAtMs(appData);
+
+        if (Number.isFinite(remoteUpdatedAtMs) && remoteUpdatedAtMs > localUpdatedAtMs) {
+            appData = remoteData;
+            ensureDataIntegrity();
+            localStorage.setItem('ferretto_edu_pro_data', JSON.stringify(appData));
+            refreshAfterRemoteSync();
+            showToast('Synced latest cloud changes.', 'info');
+        }
+    } catch (error) {
+        console.error('Google Sheets polling failed:', error);
+    }
+}
+
+function startRemoteSyncPolling() {
+    if (!hasRemoteDb() || remotePollInterval) return;
+
+    remotePollInterval = setInterval(() => {
+        syncRemoteIfNewer();
+    }, CLOUD_SYNC_CONFIG.POLL_INTERVAL_MS);
+}
+
+function refreshAfterRemoteSync() {
+    if (!currentUser) return;
+
+    const updatedCurrentUser = appData.users.find(user => user.id === currentUser.id);
+    if (!updatedCurrentUser) {
+        handleLogout();
+        showToast('Your account is no longer available.', 'warning');
+        return;
+    }
+
+    currentUser = updatedCurrentUser;
+    sessionStorage.setItem('currentUser', JSON.stringify(currentUser));
+    showDashboard();
+}
+
 async function loadAppData() {
     try {
         if (hasRemoteDb()) {
             try {
                 const remoteData = await fetchRemoteAppData();
-                if (remoteData && typeof remoteData === 'object') {
-                    appData = remoteData;
+                if (remoteData?.data && typeof remoteData.data === 'object') {
+                    appData = remoteData.data;
                     ensureDataIntegrity();
                     localStorage.setItem('ferretto_edu_pro_data', JSON.stringify(appData));
                     console.log('Loaded cloud data from Google Sheets');
@@ -177,6 +240,7 @@ async function loadAppData() {
 
 function saveAppData() {
     try {
+        touchDataUpdatedAt();
         localStorage.setItem('ferretto_edu_pro_data', JSON.stringify(appData));
         queueRemoteSave();
         return true;
