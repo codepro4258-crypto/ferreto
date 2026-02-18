@@ -38,19 +38,23 @@ npm run build
 
 ## Google Sheets Cloud Database (Worldwide Shared Data)
 
-The app now supports cloud sync using Google Sheets through a deployed Google Apps Script web app. This makes user/account changes shared globally instead of being only local browser storage.
+If you want to use **Google Sheets as your database**, follow this exact setup. After this, data created by one user/device (for example in India) will sync to other users/devices (for example in the US).
 
-### What changed
+### How it works in this project
 
-- Data still caches in `localStorage` for speed/fallback.
-- If a Google Apps Script URL is configured, data is loaded from and saved to Google Sheets.
-- New records (including users) use global unique IDs (`crypto.randomUUID`-based when available), reducing collisions across devices.
+- Your app keeps a local copy in `localStorage` for fast UI.
+- When Google Sheets Web App URL is configured, app also:
+  - loads cloud data on startup,
+  - saves cloud data after changes,
+  - polls cloud every ~8 seconds for newer data.
+- A timestamp (`updatedAt` / `metadata.lastUpdatedAt`) is used so newer cloud data can be applied safely.
 
-### Setup steps
+### Step-by-step setup (recommended)
 
-1. Create a Google Sheet.
-2. Open **Extensions → Apps Script**.
-3. Paste this script and deploy as a **Web app** (execute as *Me*, access *Anyone with link*):
+1. Create a new Google Sheet (name it something like `FerrettoDB`).
+2. Open that sheet and go to **Extensions → Apps Script**.
+3. Delete any default code in `Code.gs`.
+4. Paste this script:
 
 ```javascript
 function doGet(e) {
@@ -73,9 +77,18 @@ function doGet(e) {
 
 function doPost(e) {
   const body = JSON.parse((e && e.postData && e.postData.contents) || '{}');
+
   if (body.action === 'save' && body.data) {
-    PropertiesService.getScriptProperties().setProperty('FERRETTO_DATA', JSON.stringify(body.data));
-    PropertiesService.getScriptProperties().setProperty('FERRETTO_UPDATED_AT', body.updatedAt || new Date().toISOString());
+    PropertiesService.getScriptProperties().setProperty(
+      'FERRETTO_DATA',
+      JSON.stringify(body.data)
+    );
+
+    PropertiesService.getScriptProperties().setProperty(
+      'FERRETTO_UPDATED_AT',
+      body.updatedAt || new Date().toISOString()
+    );
+
     return ContentService
       .createTextOutput(JSON.stringify({ ok: true }))
       .setMimeType(ContentService.MimeType.JSON);
@@ -87,8 +100,21 @@ function doPost(e) {
 }
 ```
 
-4. Copy your deployed Web App URL.
-5. Set it in `index.html`:
+5. Click **Deploy → New deployment**.
+6. Choose type **Web app**.
+7. Set:
+   - **Execute as**: `Me`
+   - **Who has access**: `Anyone with the link`
+8. Click **Deploy** and authorize permissions.
+9. Copy the Web App URL (it looks like `https://script.google.com/macros/s/.../exec`).
+
+### Connect the URL to this app
+
+Use either option below.
+
+#### Option A: Hardcode in `index.html` (best for shared deployment)
+
+Add this before loading `app.js`:
 
 ```html
 <script>
@@ -96,16 +122,40 @@ window.FERRETTO_GOOGLE_SHEETS_WEB_APP_URL = "https://script.google.com/macros/s/
 </script>
 ```
 
-6. Reload the app. Data edits (users/projects/etc.) will now sync through Google and can be accessed worldwide.
+#### Option B: Set from browser console (quick testing)
+
+```js
+localStorage.setItem('ferretto_google_sheets_web_app_url', 'https://script.google.com/macros/s/DEPLOYMENT_ID/exec');
+location.reload();
+```
+
+### Verify it is working
+
+1. Open app in Browser A (e.g., India location/VPN).
+2. Login as admin and create a new user.
+3. Open app in Browser B (e.g., US location/VPN) with same configured URL.
+4. Wait a few seconds (poll interval ~8s) and refresh dashboard if needed.
+5. The newly created user should appear.
+
+### Troubleshooting
+
+- **Data is not syncing**
+  - Ensure deployment access is `Anyone with the link`.
+  - Ensure URL ends with `/exec` (not `/dev`).
+  - Confirm the URL is set in `index.html` or `localStorage`.
+
+- **Old data appears**
+  - Redeploy Apps Script after code changes.
+  - Clear browser storage and reload once.
+
+- **CORS / fetch errors**
+  - Re-deploy Web App and confirm correct permissions.
 
 ### Live updates across countries (India ↔ US)
 
-- The app now stores a `metadata.lastUpdatedAt` timestamp whenever data is saved.
-- Every ~8 seconds, each client checks Google Sheets for newer data.
-- If a newer version exists, dashboards refresh automatically, so IDs created by an admin in India become visible for users in the US without a manual export/import.
-
-> Tip: You can also set/update the URL at runtime in browser console with:
-> `localStorage.setItem('ferretto_google_sheets_web_app_url', 'YOUR_URL')`
+- IDs and records created in one country are saved to Google Apps Script storage.
+- Other logged-in clients poll for newer timestamped data and auto-load it.
+- This gives near-live shared access without running your own backend server.
 
 ## Project Structure
 
