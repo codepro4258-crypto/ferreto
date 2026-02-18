@@ -1427,6 +1427,10 @@ function updatePreview() {
     
     const code = mainEditor.getValue();
     const iframe = document.getElementById('previewFrame');
+    if (!iframe) {
+        showToast('Preview frame not available', 'warning');
+        return;
+    }
     const doc = iframe.contentDocument || iframe.contentWindow.document;
     
     try {
@@ -1448,6 +1452,10 @@ function openPreviewInNewTab() {
     if (!mainEditor) return;
     const code = mainEditor.getValue();
     const newWindow = window.open();
+    if (!newWindow) {
+        showToast('Unable to open preview tab. Please allow pop-ups for this site.', 'warning');
+        return;
+    }
     newWindow.document.write(code);
     newWindow.document.close();
 }
@@ -1925,7 +1933,9 @@ function stopAttendanceScanner() {
     const canvas = document.getElementById('attendanceCanvas');
     if (canvas) {
         const ctx = canvas.getContext('2d');
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        if (ctx) {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+        }
     }
     updateAttendanceScannerStatus('Camera Off', false);
     const startBtn = document.getElementById('btnStartAttendance');
