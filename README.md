@@ -57,11 +57,12 @@ function doGet(e) {
   const action = (e && e.parameter && e.parameter.action) || '';
   const props = PropertiesService.getScriptProperties();
   const raw = props.getProperty('FERRETTO_DATA') || '{}';
+  const updatedAt = props.getProperty('FERRETTO_UPDATED_AT') || '';
   const data = JSON.parse(raw);
 
   if (action === 'load') {
     return ContentService
-      .createTextOutput(JSON.stringify({ data }))
+      .createTextOutput(JSON.stringify({ data, updatedAt }))
       .setMimeType(ContentService.MimeType.JSON);
   }
 
@@ -74,6 +75,7 @@ function doPost(e) {
   const body = JSON.parse((e && e.postData && e.postData.contents) || '{}');
   if (body.action === 'save' && body.data) {
     PropertiesService.getScriptProperties().setProperty('FERRETTO_DATA', JSON.stringify(body.data));
+    PropertiesService.getScriptProperties().setProperty('FERRETTO_UPDATED_AT', body.updatedAt || new Date().toISOString());
     return ContentService
       .createTextOutput(JSON.stringify({ ok: true }))
       .setMimeType(ContentService.MimeType.JSON);
@@ -95,6 +97,12 @@ window.FERRETTO_GOOGLE_SHEETS_WEB_APP_URL = "https://script.google.com/macros/s/
 ```
 
 6. Reload the app. Data edits (users/projects/etc.) will now sync through Google and can be accessed worldwide.
+
+### Live updates across countries (India ↔ US)
+
+- The app now stores a `metadata.lastUpdatedAt` timestamp whenever data is saved.
+- Every ~8 seconds, each client checks Google Sheets for newer data.
+- If a newer version exists, dashboards refresh automatically, so IDs created by an admin in India become visible for users in the US without a manual export/import.
 
 > Tip: You can also set/update the URL at runtime in browser console with:
 > `localStorage.setItem('ferretto_google_sheets_web_app_url', 'YOUR_URL')`
