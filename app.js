@@ -1400,6 +1400,28 @@ function initCodeEditors() {
     }, ENTERPRISE_CONFIG.AUTO_SAVE_INTERVAL);
 }
 
+
+function formatCode() {
+    if (!materialEditor) {
+        showToast('Editor not ready yet', 'warning');
+        return;
+    }
+
+    const code = materialEditor.getValue();
+    if (!code.trim()) {
+        showToast('Add some code before formatting', 'warning');
+        return;
+    }
+
+    let formatted = code
+        .replace(/>\s+</g, '>\n<')
+        .replace(/\n{3,}/g, '\n\n')
+        .trim();
+
+    materialEditor.setValue(formatted);
+    showToast('Code formatted', 'success');
+}
+
 function updatePreview() {
     if (!mainEditor) return;
     
@@ -1752,6 +1774,16 @@ async function startAttendanceScanner() {
 
     // Start camera
     const video = document.getElementById('attendanceVideo');
+    if (!video) {
+        showToast('Attendance video component is not available on this page.', 'error');
+        updateAttendanceScannerStatus('Unavailable', false);
+        return;
+    }
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        showToast('Camera is not supported in this browser/environment.', 'error');
+        updateAttendanceScannerStatus('Camera Unsupported', false);
+        return;
+    }
     try {
         attendanceStream = await navigator.mediaDevices.getUserMedia({
             video: { width: 640, height: 480, facingMode: 'user' }
@@ -1776,6 +1808,11 @@ async function startAttendanceScanner() {
     }
 
     const canvas = document.getElementById('attendanceCanvas');
+    if (!canvas) {
+        showToast('Attendance canvas component is missing.', 'error');
+        stopAttendanceScanner();
+        return;
+    }
     const displaySize = { width: video.videoWidth || 640, height: video.videoHeight || 480 };
     faceapi.matchDimensions(canvas, displaySize);
 
@@ -1895,6 +1932,16 @@ async function testFaceVerification() {
     
     let stream = null;
     const video = document.getElementById('attendanceVideo');
+    if (!video) {
+        updateAttendanceScannerStatus('Unavailable', false);
+        showToast('Attendance video component is not available on this page.', 'error');
+        return;
+    }
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        updateAttendanceScannerStatus('Camera Unsupported', false);
+        showToast('Camera is not supported in this browser/environment.', 'error');
+        return;
+    }
     try {
         stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' } });
         video.srcObject = stream;
