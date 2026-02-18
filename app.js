@@ -35,7 +35,7 @@ const ENTERPRISE_CONFIG = {
 
 const CLOUD_SYNC_CONFIG = {
     STORAGE_KEY: 'ferretto_google_sheets_web_app_url',
-    WEB_APP_URL: window.FERRETTO_GOOGLE_SHEETS_WEB_APP_URL || '',
+    WEB_APP_URL: window.FERRETTO_GOOGLE_SHEETS_WEB_APP_URL || 'https://script.google.com/macros/s/AKfycbxAAs9qfs-bmFbcLH3HVmHcvDX00YNHnb5WlWON5cQanCCSS28i8GLkM00wZonjxSs8/exec',
     SAVE_DEBOUNCE_MS: 600
 };
 
@@ -1729,12 +1729,32 @@ async function loadFaceApiModels() {
         return false;
     }
     try {
-        const MODEL_URL = 'https://cdn.jsdelivr.net/npm/@vladmandic/face-api/model';
-        await Promise.all([
-            faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL),
-            faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL),
-            faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL)
-        ]);
+        const modelUrls = [
+            'https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/weights',
+            'https://justadudewhohacks.github.io/face-api.js/weights'
+        ];
+
+        let loaded = false;
+        let lastError = null;
+
+        for (const modelUrl of modelUrls) {
+            try {
+                await Promise.all([
+                    faceapi.nets.tinyFaceDetector.loadFromUri(modelUrl),
+                    faceapi.nets.faceLandmark68Net.loadFromUri(modelUrl),
+                    faceapi.nets.faceRecognitionNet.loadFromUri(modelUrl)
+                ]);
+                loaded = true;
+                break;
+            } catch (err) {
+                lastError = err;
+            }
+        }
+
+        if (!loaded) {
+            throw lastError || new Error('Unable to load face recognition models from configured CDNs');
+        }
+
         faceApiModelsLoaded = true;
         console.log('Face API models loaded');
         return true;
