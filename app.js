@@ -35,7 +35,7 @@ const ENTERPRISE_CONFIG = {
 
 const CLOUD_SYNC_CONFIG = {
     STORAGE_KEY: 'ferretto_google_sheets_web_app_url',
-    WEB_APP_URL: window.FERRETTO_GOOGLE_SHEETS_WEB_APP_URL || 'https://script.google.com/macros/s/AKfycbyHdTj2GOS2l8YJo3nJbwV2j8WUTPrcA0GSsEWNTFHQXbRpUV_ESSPtnReJS-udWIgHug/exec',
+    WEB_APP_URL: window.FERRETTO_GOOGLE_SHEETS_WEB_APP_URL || '',
     SAVE_DEBOUNCE_MS: 600,
     POLL_INTERVAL_MS: 8000
 };
