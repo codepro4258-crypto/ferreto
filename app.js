@@ -64,6 +64,7 @@ let registrationDescriptorSamples = [];
 let registrationProcessingFrame = false;
 let remoteSaveTimeout = null;
 let remoteSaveInProgress = false;
+let remoteSyncWarningShown = false;
 
 // =========================================
 // 3. INITIALIZATION
@@ -88,6 +89,15 @@ function getRemoteDbUrl() {
 
 function hasRemoteDb() {
     return Boolean(getRemoteDbUrl());
+}
+
+function isUsableAppData(data) {
+    return Boolean(
+        data &&
+        typeof data === 'object' &&
+        Array.isArray(data.users) &&
+        data.users.length > 0
+    );
 }
 
 async function fetchRemoteAppData() {
@@ -136,7 +146,10 @@ function queueRemoteSave() {
             await pushRemoteAppData();
         } catch (error) {
             console.error('Google Sheets sync save failed:', error);
-            showToast('Cloud sync failed. Data saved locally.', 'warning');
+            if (!remoteSyncWarningShown) {
+                showToast('Cloud sync failed. Data saved locally.', 'warning');
+                remoteSyncWarningShown = true;
+            }
         } finally {
             remoteSaveInProgress = false;
         }
@@ -148,12 +161,16 @@ async function loadAppData() {
         if (hasRemoteDb()) {
             try {
                 const remoteData = await fetchRemoteAppData();
-                if (remoteData && typeof remoteData === 'object') {
+                if (isUsableAppData(remoteData)) {
                     appData = remoteData;
                     ensureDataIntegrity();
                     localStorage.setItem('ferretto_edu_pro_data', JSON.stringify(appData));
                     console.log('Loaded cloud data from Google Sheets');
                     return;
+                }
+
+                if (remoteData && typeof remoteData === 'object') {
+                    console.warn('Cloud data is empty/invalid. Falling back to local/default data.');
                 }
             } catch (error) {
                 console.error('Google Sheets sync load failed. Falling back to local data:', error);
@@ -170,6 +187,12 @@ async function loadAppData() {
         } else {
             appData = JSON.parse(stored);
             ensureDataIntegrity();
+            if (!isUsableAppData(appData)) {
+                console.warn('Local data was invalid. Restoring default dataset.');
+                appData = getDefaultData();
+                localStorage.setItem('ferretto_edu_pro_data', JSON.stringify(appData));
+                queueRemoteSave();
+            }
             console.log("Loaded existing data");
         }
     } catch (error) {
@@ -494,7 +517,9 @@ function getDefaultData() {
 }
 
 function ensureDataIntegrity() {
-    appData.users = appData.users || [];
+    if (!Array.isArray(appData.users) || appData.users.length === 0) {
+        appData.users = getDefaultData().users;
+    }
     appData.courses = appData.courses || [];
     appData.materials = appData.materials || [];
     appData.attendance = appData.attendance || [];
