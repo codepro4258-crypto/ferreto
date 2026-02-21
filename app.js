@@ -33,6 +33,14 @@ const ENTERPRISE_CONFIG = {
     ENABLE_BACKUP: true
 };
 
+const CLOUD_SYNC_CONFIG = {
+    STORAGE_KEY: 'ferretto_google_sheets_web_app_url',
+    WEB_APP_URL: (typeof window !== 'undefined' && window.FERRETTO_GOOGLE_SHEETS_WEB_APP_URL)
+        ? String(window.FERRETTO_GOOGLE_SHEETS_WEB_APP_URL).trim()
+        : '',
+    SAVE_DEBOUNCE_MS: 1200
+};
+
 
 // =========================================
 // 2. GLOBAL VARIABLES
