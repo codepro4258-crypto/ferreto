@@ -33,6 +33,14 @@ const ENTERPRISE_CONFIG = {
     ENABLE_BACKUP: true
 };
 
+const CLOUD_SYNC_CONFIG = {
+    STORAGE_KEY: 'ferretto_google_sheets_web_app_url',
+    WEB_APP_URL: (typeof window !== 'undefined' && window.FERRETTO_GOOGLE_SHEETS_WEB_APP_URL)
+        ? String(window.FERRETTO_GOOGLE_SHEETS_WEB_APP_URL).trim()
+        : '',
+    SAVE_DEBOUNCE_MS: 1200
+};
+
 
 // =========================================
 // 2. GLOBAL VARIABLES
@@ -56,6 +64,7 @@ let registrationDescriptorSamples = [];
 let registrationProcessingFrame = false;
 let remoteSaveTimeout = null;
 let remoteSaveInProgress = false;
+let remoteSyncWarningShown = false;
 
 // =========================================
 // 3. INITIALIZATION
@@ -80,6 +89,15 @@ function getRemoteDbUrl() {
 
 function hasRemoteDb() {
     return Boolean(getRemoteDbUrl());
+}
+
+function isUsableAppData(data) {
+    return Boolean(
+        data &&
+        typeof data === 'object' &&
+        Array.isArray(data.users) &&
+        data.users.length > 0
+    );
 }
 
 async function fetchRemoteAppData() {
@@ -128,7 +146,10 @@ function queueRemoteSave() {
             await pushRemoteAppData();
         } catch (error) {
             console.error('Google Sheets sync save failed:', error);
-            showToast('Cloud sync failed. Data saved locally.', 'warning');
+            if (!remoteSyncWarningShown) {
+                showToast('Cloud sync failed. Data saved locally.', 'warning');
+                remoteSyncWarningShown = true;
+            }
         } finally {
             remoteSaveInProgress = false;
         }
@@ -140,12 +161,16 @@ async function loadAppData() {
         if (hasRemoteDb()) {
             try {
                 const remoteData = await fetchRemoteAppData();
-                if (remoteData && typeof remoteData === 'object') {
+                if (isUsableAppData(remoteData)) {
                     appData = remoteData;
                     ensureDataIntegrity();
                     localStorage.setItem('ferretto_edu_pro_data', JSON.stringify(appData));
                     console.log('Loaded cloud data from Google Sheets');
                     return;
+                }
+
+                if (remoteData && typeof remoteData === 'object') {
+                    console.warn('Cloud data is empty/invalid. Falling back to local/default data.');
                 }
             } catch (error) {
                 console.error('Google Sheets sync load failed. Falling back to local data:', error);
@@ -162,6 +187,12 @@ async function loadAppData() {
         } else {
             appData = JSON.parse(stored);
             ensureDataIntegrity();
+            if (!isUsableAppData(appData)) {
+                console.warn('Local data was invalid. Restoring default dataset.');
+                appData = getDefaultData();
+                localStorage.setItem('ferretto_edu_pro_data', JSON.stringify(appData));
+                queueRemoteSave();
+            }
             console.log("Loaded existing data");
         }
     } catch (error) {
@@ -170,14 +201,82 @@ async function loadAppData() {
     }
 }
 
+function isQuotaExceededError(error) {
+    if (!error) return false;
+    return error.name === 'QuotaExceededError' || error.code === 22 || error.code === 1014;
+}
+
+function pruneDataForStorage(data) {
+    if (!data || typeof data !== 'object') return data;
+
+    if (Array.isArray(data.systemLogs) && data.systemLogs.length > 500) {
+        data.systemLogs = data.systemLogs.slice(0, 500);
+    }
+
+    if (Array.isArray(data.projects)) {
+        data.projects = data.projects.map(project => {
+            if (!project || typeof project !== 'object') return project;
+            if (typeof project.code === 'string' && project.code.length > 200000) {
+                return {
+                    ...project,
+                    code: `${project.code.slice(0, 200000)}
+/* Truncated automatically to fit browser storage limits. */`
+                };
+            }
+            return project;
+        });
+    }
+
+    if (Array.isArray(data.materials)) {
+        data.materials = data.materials.map(material => {
+            if (!material || typeof material !== 'object') return material;
+            if (typeof material.content === 'string' && material.content.length > 200000) {
+                return {
+                    ...material,
+                    content: `${material.content.slice(0, 200000)}
+
+[Truncated automatically to fit browser storage limits.]`
+                };
+            }
+            return material;
+        });
+    }
+
+    return data;
+}
+
 function saveAppData() {
     try {
         localStorage.setItem('ferretto_edu_pro_data', JSON.stringify(appData));
         queueRemoteSave();
         return true;
     } catch (error) {
-        console.error("Failed to save app data:", error);
-        showToast("Failed to save data", "error");
+        if (isQuotaExceededError(error)) {
+            console.warn('Storage quota exceeded. Pruning large data before retrying save.');
+            appData = pruneDataForStorage(appData);
+            try {
+                localStorage.setItem('ferretto_edu_pro_data', JSON.stringify(appData));
+                queueRemoteSave();
+                showToast('Storage was full. Old logs/large entries were trimmed and data was saved.', 'warning');
+                return true;
+            } catch (retryError) {
+                console.error('Failed to save app data after pruning:', retryError);
+            }
+        } else {
+            console.error('Failed to save app data:', error);
+        }
+
+        if (hasRemoteDb()) {
+            pushRemoteAppData()
+                .then(() => showToast('Local save failed, but data was saved to Google Sheets.', 'warning'))
+                .catch((remoteError) => {
+                    console.error('Remote save failed after local save failure:', remoteError);
+                    showToast('Failed to save data', 'error');
+                });
+            return false;
+        }
+
+        showToast('Failed to save data', 'error');
         return false;
     }
 }
@@ -429,7 +528,9 @@ function getDefaultData() {
 }
 
 function ensureDataIntegrity() {
-    appData.users = appData.users || [];
+    if (!Array.isArray(appData.users) || appData.users.length === 0) {
+        appData.users = getDefaultData().users;
+    }
     appData.courses = appData.courses || [];
     appData.materials = appData.materials || [];
     appData.attendance = appData.attendance || [];
