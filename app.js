@@ -263,20 +263,9 @@ function saveAppData() {
                 console.error('Failed to save app data after pruning:', retryError);
             }
         } else {
-            console.error('Failed to save app data:', error);
+            console.error("Failed to save app data:", error);
         }
-
-        if (hasRemoteDb()) {
-            pushRemoteAppData()
-                .then(() => showToast('Local save failed, but data was saved to Google Sheets.', 'warning'))
-                .catch((remoteError) => {
-                    console.error('Remote save failed after local save failure:', remoteError);
-                    showToast('Failed to save data', 'error');
-                });
-            return false;
-        }
-
-        showToast('Failed to save data', 'error');
+        showToast("Failed to save data", "error");
         return false;
     }
 }
