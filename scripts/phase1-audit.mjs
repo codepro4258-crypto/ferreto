@@ -3,14 +3,21 @@ import fs from 'node:fs';
 const html = fs.readFileSync('index.html', 'utf8');
 const js = fs.readFileSync('app.js', 'utf8');
 
-const onclickRegex = /onclick="([a-zA-Z0-9_]+)\(/g;
-const functionRegex = /function\s+([a-zA-Z0-9_]+)\s*\(/g;
+const onclickRegex = /onclick\s*=\s*["']\s*([a-zA-Z_$][\w$]*)\s*\(/g;
+
+const functionPatterns = [
+  /function\s+([a-zA-Z_$][\w$]*)\s*\(/g,
+  /async\s+function\s+([a-zA-Z_$][\w$]*)\s*\(/g,
+  /(?:const|let|var)\s+([a-zA-Z_$][\w$]*)\s*=\s*(?:async\s*)?\([^)]*\)\s*=>/g
+];
 
 const onclickFunctions = new Set();
 for (const m of html.matchAll(onclickRegex)) onclickFunctions.add(m[1]);
 
 const implementedFunctions = new Set();
-for (const m of js.matchAll(functionRegex)) implementedFunctions.add(m[1]);
+for (const regex of functionPatterns) {
+  for (const m of js.matchAll(regex)) implementedFunctions.add(m[1]);
+}
 
 const missingHandlers = [...onclickFunctions].filter((fn) => !implementedFunctions.has(fn)).sort();
 
@@ -25,6 +32,7 @@ const report = {
   checks: {
     onclick_handler_coverage: {
       totalHandlers: onclickFunctions.size,
+      totalImplementedFunctions: implementedFunctions.size,
       missingHandlers,
       status: missingHandlers.length === 0 ? 'pass' : 'fail'
     },
