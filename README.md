@@ -42,8 +42,8 @@ The app now supports cloud sync using Google Sheets through a deployed Google Ap
 
 ### What changed
 
-- Data still caches in `localStorage` for speed/fallback.
-- If a Google Apps Script URL is configured, data is loaded from and saved to Google Sheets.
+- Data is loaded from/saved to Google Sheets only (no local/session browser persistence for app data).
+- If Google Sheets is unavailable, the app uses in-memory default data for that page session only.
 - New records (including users) use global unique IDs (`crypto.randomUUID`-based when available), reducing collisions across devices.
 
 ### Setup steps
@@ -97,7 +97,7 @@ window.FERRETTO_GOOGLE_SHEETS_WEB_APP_URL = "https://script.google.com/macros/s/
 6. Reload the app. Data edits (users/projects/etc.) will now sync through Google and can be accessed worldwide.
 
 > Tip: You can also set/update the URL at runtime in browser console with:
-> `localStorage.setItem('ferretto_google_sheets_web_app_url', 'YOUR_URL')`
+> `sessionStorage.setItem('ferretto_google_sheets_web_app_url', 'YOUR_URL')`
 
 ## Project Structure
 

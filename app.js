@@ -33,6 +33,14 @@ const ENTERPRISE_CONFIG = {
     ENABLE_BACKUP: true
 };
 
+const CLOUD_SYNC_CONFIG = {
+    STORAGE_KEY: 'ferretto_google_sheets_web_app_url',
+    WEB_APP_URL: (typeof window !== 'undefined' && window.FERRETTO_GOOGLE_SHEETS_WEB_APP_URL)
+        ? String(window.FERRETTO_GOOGLE_SHEETS_WEB_APP_URL).trim()
+        : '',
+    SAVE_DEBOUNCE_MS: 1200
+};
+
 
 // =========================================
 // 2. GLOBAL VARIABLES
@@ -56,6 +64,7 @@ let registrationDescriptorSamples = [];
 let registrationProcessingFrame = false;
 let remoteSaveTimeout = null;
 let remoteSaveInProgress = false;
+let remoteSyncWarningShown = false;
 
 // =========================================
 // 3. INITIALIZATION
@@ -75,11 +84,20 @@ async function initializeApp() {
 }
 
 function getRemoteDbUrl() {
-    return (localStorage.getItem(CLOUD_SYNC_CONFIG.STORAGE_KEY) || CLOUD_SYNC_CONFIG.WEB_APP_URL || '').trim();
+    return (sessionStorage.getItem(CLOUD_SYNC_CONFIG.STORAGE_KEY) || CLOUD_SYNC_CONFIG.WEB_APP_URL || '').trim();
 }
 
 function hasRemoteDb() {
     return Boolean(getRemoteDbUrl());
+}
+
+function isUsableAppData(data) {
+    return Boolean(
+        data &&
+        typeof data === 'object' &&
+        Array.isArray(data.users) &&
+        data.users.length > 0
+    );
 }
 
 async function fetchRemoteAppData() {
@@ -87,12 +105,22 @@ async function fetchRemoteAppData() {
     if (!remoteUrl) return null;
 
     const requestUrl = `${remoteUrl}${remoteUrl.includes('?') ? '&' : '?'}action=load`;
-    const response = await fetch(requestUrl, { method: 'GET' });
+    const response = await fetch(requestUrl, {
+        method: 'GET',
+        mode: 'cors',
+        credentials: 'omit',
+        redirect: 'follow'
+    });
+
     if (!response.ok) {
         throw new Error(`Remote load failed (${response.status})`);
     }
 
     const payload = await response.json();
+    if (payload && payload.ok === false) {
+        throw new Error(payload.error || 'Remote load returned an error payload');
+    }
+
     return payload?.data || payload || null;
 }
 
@@ -100,9 +128,13 @@ async function pushRemoteAppData() {
     const remoteUrl = getRemoteDbUrl();
     if (!remoteUrl) return true;
 
+    // Use text/plain so request remains CORS-simple (avoids preflight failure on Apps Script web apps).
     const response = await fetch(remoteUrl, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        mode: 'cors',
+        credentials: 'omit',
+        redirect: 'follow',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
         body: JSON.stringify({
             action: 'save',
             updatedAt: new Date().toISOString(),
@@ -112,6 +144,20 @@ async function pushRemoteAppData() {
 
     if (!response.ok) {
         throw new Error(`Remote save failed (${response.status})`);
+    }
+
+    const responseText = await response.text();
+    if (responseText) {
+        let payload = null;
+        try {
+            payload = JSON.parse(responseText);
+        } catch (parseError) {
+            console.warn('Remote save response was not JSON. Continuing as success.');
+        }
+
+        if (payload && payload.ok === false) {
+            throw new Error(payload.error || 'Remote save returned an error payload');
+        }
     }
 
     return true;
@@ -128,7 +174,10 @@ function queueRemoteSave() {
             await pushRemoteAppData();
         } catch (error) {
             console.error('Google Sheets sync save failed:', error);
-            showToast('Cloud sync failed. Data saved locally.', 'warning');
+            if (!remoteSyncWarningShown) {
+                showToast('Cloud sync failed. Changes are not persisted until sync recovers.', 'warning');
+                remoteSyncWarningShown = true;
+            }
         } finally {
             remoteSaveInProgress = false;
         }
@@ -140,46 +189,41 @@ async function loadAppData() {
         if (hasRemoteDb()) {
             try {
                 const remoteData = await fetchRemoteAppData();
-                if (remoteData && typeof remoteData === 'object') {
+                if (isUsableAppData(remoteData)) {
                     appData = remoteData;
                     ensureDataIntegrity();
-                    localStorage.setItem('ferretto_edu_pro_data', JSON.stringify(appData));
                     console.log('Loaded cloud data from Google Sheets');
                     return;
                 }
+
+                if (remoteData && typeof remoteData === 'object') {
+                    console.warn('Cloud data is empty/invalid. Using default dataset.');
+                }
             } catch (error) {
-                console.error('Google Sheets sync load failed. Falling back to local data:', error);
+                console.error('Google Sheets sync load failed. Using default dataset:', error);
             }
+        } else {
+            console.warn('Google Sheets URL is not configured. Running with in-memory default data only.');
         }
 
-        const stored = localStorage.getItem('ferretto_edu_pro_data');
-        if (!stored) {
-            // Create default data
-            appData = getDefaultData();
-            localStorage.setItem('ferretto_edu_pro_data', JSON.stringify(appData));
-            queueRemoteSave();
-            console.log("Initialized with default data");
-        } else {
-            appData = JSON.parse(stored);
-            ensureDataIntegrity();
-            console.log("Loaded existing data");
-        }
-    } catch (error) {
-        console.error("Failed to load app data:", error);
         appData = getDefaultData();
+        ensureDataIntegrity();
+    } catch (error) {
+        console.error('Failed to load app data:', error);
+        appData = getDefaultData();
+        ensureDataIntegrity();
     }
 }
 
 function saveAppData() {
-    try {
-        localStorage.setItem('ferretto_edu_pro_data', JSON.stringify(appData));
-        queueRemoteSave();
-        return true;
-    } catch (error) {
-        console.error("Failed to save app data:", error);
-        showToast("Failed to save data", "error");
+    if (!hasRemoteDb()) {
+        console.error('Failed to save data: Google Sheets URL is not configured.');
+        showToast('Failed to save data: configure Google Sheets URL first.', 'error');
         return false;
     }
+
+    queueRemoteSave();
+    return true;
 }
 
 function generateGlobalId(prefix = 'id') {
@@ -429,7 +473,9 @@ function getDefaultData() {
 }
 
 function ensureDataIntegrity() {
-    appData.users = appData.users || [];
+    if (!Array.isArray(appData.users) || appData.users.length === 0) {
+        appData.users = getDefaultData().users;
+    }
     appData.courses = appData.courses || [];
     appData.materials = appData.materials || [];
     appData.attendance = appData.attendance || [];
@@ -1314,7 +1360,7 @@ function initCodeEditors() {
         });
         
         // Load last saved code
-        const lastCode = localStorage.getItem('ferretto_last_code');
+        const lastCode = sessionStorage.getItem('ferretto_last_code');
         if (lastCode) {
             mainEditor.setValue(lastCode);
         } else {
@@ -1390,7 +1436,7 @@ function initCodeEditors() {
     setInterval(() => {
         if (mainEditor) {
             const code = mainEditor.getValue();
-            localStorage.setItem('ferretto_last_code', code);
+            sessionStorage.setItem('ferretto_last_code', code);
         }
     }, ENTERPRISE_CONFIG.AUTO_SAVE_INTERVAL);
 }
