@@ -10,9 +10,16 @@
 - Output report: `phase1-audit-report.json`
 
 ## 3) If you see "Failed to save data"
-- Confirm your Google Apps Script URL is configured.
-- Confirm Web App deployment uses `/exec` URL and public access.
-- Open `<your-url>?action=load` and verify JSON response.
+This is usually a browser storage limit issue (localStorage quota).
+The app now auto-recovers by:
+- trimming old system logs,
+- trimming extremely large project/material content,
+- retrying save automatically.
+
+If warning still appears repeatedly:
+1. Export important data first.
+2. Delete unused large materials/projects.
+3. Clear browser site storage for this app and log in again.
 
 ## 4) Recommended operational checks
 - Syntax check main app: `node --check app.js`

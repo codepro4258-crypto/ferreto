@@ -175,7 +175,7 @@ function queueRemoteSave() {
         } catch (error) {
             console.error('Google Sheets sync save failed:', error);
             if (!remoteSyncWarningShown) {
-                showToast('Cloud sync failed. Changes are not persisted until sync recovers.', 'warning');
+                showToast('Cloud sync failed. Data saved locally.', 'warning');
                 remoteSyncWarningShown = true;
             }
         } finally {
@@ -197,13 +197,21 @@ async function loadAppData() {
                 }
 
                 if (remoteData && typeof remoteData === 'object') {
-                    console.warn('Cloud data is empty/invalid. Using default dataset.');
+                    console.warn('Cloud data is empty/invalid. Falling back to local/default data.');
                 }
             } catch (error) {
                 console.error('Google Sheets sync load failed. Using default dataset:', error);
             }
         } else {
-            console.warn('Google Sheets URL is not configured. Running with in-memory default data only.');
+            appData = JSON.parse(stored);
+            ensureDataIntegrity();
+            if (!isUsableAppData(appData)) {
+                console.warn('Local data was invalid. Restoring default dataset.');
+                appData = getDefaultData();
+                localStorage.setItem('ferretto_edu_pro_data', JSON.stringify(appData));
+                queueRemoteSave();
+            }
+            console.log("Loaded existing data");
         }
 
         appData = getDefaultData();
@@ -215,10 +223,71 @@ async function loadAppData() {
     }
 }
 
+function isQuotaExceededError(error) {
+    if (!error) return false;
+    return error.name === 'QuotaExceededError' || error.code === 22 || error.code === 1014;
+}
+
+function pruneDataForStorage(data) {
+    if (!data || typeof data !== 'object') return data;
+
+    if (Array.isArray(data.systemLogs) && data.systemLogs.length > 500) {
+        data.systemLogs = data.systemLogs.slice(0, 500);
+    }
+
+    if (Array.isArray(data.projects)) {
+        data.projects = data.projects.map(project => {
+            if (!project || typeof project !== 'object') return project;
+            if (typeof project.code === 'string' && project.code.length > 200000) {
+                return {
+                    ...project,
+                    code: `${project.code.slice(0, 200000)}
+/* Truncated automatically to fit browser storage limits. */`
+                };
+            }
+            return project;
+        });
+    }
+
+    if (Array.isArray(data.materials)) {
+        data.materials = data.materials.map(material => {
+            if (!material || typeof material !== 'object') return material;
+            if (typeof material.content === 'string' && material.content.length > 200000) {
+                return {
+                    ...material,
+                    content: `${material.content.slice(0, 200000)}
+
+[Truncated automatically to fit browser storage limits.]`
+                };
+            }
+            return material;
+        });
+    }
+
+    return data;
+}
+
 function saveAppData() {
-    if (!hasRemoteDb()) {
-        console.error('Failed to save data: Google Sheets URL is not configured.');
-        showToast('Failed to save data: configure Google Sheets URL first.', 'error');
+    try {
+        localStorage.setItem('ferretto_edu_pro_data', JSON.stringify(appData));
+        queueRemoteSave();
+        return true;
+    } catch (error) {
+        if (isQuotaExceededError(error)) {
+            console.warn('Storage quota exceeded. Pruning large data before retrying save.');
+            appData = pruneDataForStorage(appData);
+            try {
+                localStorage.setItem('ferretto_edu_pro_data', JSON.stringify(appData));
+                queueRemoteSave();
+                showToast('Storage was full. Old logs/large entries were trimmed and data was saved.', 'warning');
+                return true;
+            } catch (retryError) {
+                console.error('Failed to save app data after pruning:', retryError);
+            }
+        } else {
+            console.error("Failed to save app data:", error);
+        }
+        showToast("Failed to save data", "error");
         return false;
     }
 
