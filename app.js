@@ -66,6 +66,7 @@ let remoteSaveTimeout = null;
 let remoteSaveInProgress = false;
 let remoteSyncWarningShown = false;
 let remoteSyncDisabled = false;
+let remoteSyncFailureCount = 0;
 
 // =========================================
 // 3. INITIALIZATION
@@ -97,6 +98,15 @@ function disableRemoteSync(message) {
     if (!remoteSyncWarningShown && message) {
         showToast(message, 'warning');
         remoteSyncWarningShown = true;
+    }
+}
+
+function registerRemoteSyncFailure(error, context = 'sync') {
+    remoteSyncFailureCount += 1;
+    console.error(`Google Sheets ${context} failed (${remoteSyncFailureCount}/2):`, error);
+
+    if (remoteSyncFailureCount >= 2) {
+        disableRemoteSync('Cloud sync failed repeatedly. Working in local mode for this session.');
     }
 }
 
@@ -178,6 +188,7 @@ async function pushRemoteAppData() {
         }
     }
 
+    remoteSyncFailureCount = 0;
     return true;
 }
 
@@ -191,8 +202,7 @@ function queueRemoteSave() {
         try {
             await pushRemoteAppData();
         } catch (error) {
-            console.error('Google Sheets sync save failed:', error);
-            disableRemoteSync('Cloud sync failed. Working in local mode for this session.');
+            registerRemoteSyncFailure(error, 'sync save');
         } finally {
             remoteSaveInProgress = false;
         }
@@ -210,6 +220,7 @@ async function loadAppData() {
                     appData = remoteData;
                     ensureDataIntegrity();
                     localStorage.setItem('ferretto_edu_pro_data', JSON.stringify(appData));
+                    remoteSyncFailureCount = 0;
                     console.log('Loaded cloud data from Google Sheets');
                     return;
                 }
@@ -218,8 +229,7 @@ async function loadAppData() {
                     console.warn('Cloud data is empty/invalid. Falling back to local/default data.');
                 }
             } catch (error) {
-                console.error('Google Sheets sync load failed. Falling back to local data:', error);
-                disableRemoteSync('Cloud sync is unavailable. Loaded local data for this session.');
+                registerRemoteSyncFailure(error, 'sync load');
             }
         }
 
@@ -1894,6 +1904,7 @@ async function loadFaceApiModels() {
             new URL('./models', window.location.href).toString().replace(/\/$/, ''),
             'https://justadudewhohacks.github.io/face-api.js/weights',
             'https://cdn.jsdelivr.net/gh/justadudewhohacks/face-api.js/weights',
+            'https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/weights',
             'https://unpkg.com/face-api.js@0.22.2/weights'
         ];
 
