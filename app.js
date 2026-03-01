@@ -1789,6 +1789,15 @@ function normalizeFaceDescriptor(descriptor) {
     return null;
 }
 
+function hasRegisteredFace(descriptor) {
+    const normalizedDescriptor = normalizeFaceDescriptor(descriptor);
+    if (!normalizedDescriptor) return false;
+    if (Array.isArray(normalizedDescriptor[0])) {
+        return normalizedDescriptor.some(candidate => Array.isArray(candidate) && candidate.length > 0);
+    }
+    return normalizedDescriptor.length > 0;
+}
+
 function calculateDescriptorDistance(descriptorA, descriptorB) {
     const a = normalizeFaceDescriptor(descriptorA);
     const b = normalizeFaceDescriptor(descriptorB);
@@ -1945,7 +1954,10 @@ async function startAttendanceScanner() {
                 .withFaceDescriptors();
 
             const resized = faceapi.resizeResults(detections, displaySize);
-            canvas.getContext('2d').clearRect(0, 0, canvas.width, canvas.height);
+            const ctx = canvas.getContext('2d');
+            if (ctx) {
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+            }
             faceapi.draw.drawDetections(canvas, resized);
             faceapi.draw.drawFaceLandmarks(canvas, resized);
 
@@ -2146,7 +2158,7 @@ function updateAttendanceScannerStatus(label, isActive) {
 function updateAttendanceFaceStatus() {
     const statusWrap = document.getElementById('attendanceFaceStatus');
     if (!statusWrap) return;
-    const registered = Boolean(currentUser?.faceDescriptor);
+    const registered = hasRegisteredFace(currentUser?.faceDescriptor);
     statusWrap.innerHTML = registered
         ? `<span class="badge badge-success"><i class="fas fa-user-check"></i> Face ID Registered</span>`
         : `<span class="badge badge-warning"><i class="fas fa-user-shield"></i> Face ID Not Registered</span>`;
@@ -2266,7 +2278,7 @@ function loadAdminUsers() {
     
     appData.users.forEach(u => {
         const course = appData.courses.find(c => c.id == u.courseId);
-        const hasFace = u.faceDescriptor ? true : false;
+        const hasFace = hasRegisteredFace(u.faceDescriptor);
         const lastLogin = u.lastLogin ? 
             new Date(u.lastLogin).toLocaleDateString() : 'Never';
         
@@ -3679,7 +3691,7 @@ function loadSettings() {
     document.getElementById('settingsUsername').textContent = currentUser.username;
     const course = appData.courses.find(c => c.id == currentUser.courseId);
     document.getElementById('settingsCourse').textContent = course ? course.name : 'None';
-    document.getElementById('settingsFaceStatus').textContent = currentUser.faceDescriptor ? 'Registered' : 'Not Registered';
+    document.getElementById('settingsFaceStatus').textContent = hasRegisteredFace(currentUser.faceDescriptor) ? 'Registered' : 'Not Registered';
     const form = document.getElementById('changePasswordForm');
     if (form) form.reset();
 }
