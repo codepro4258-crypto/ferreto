@@ -65,6 +65,9 @@ let registrationProcessingFrame = false;
 let remoteSaveTimeout = null;
 let remoteSaveInProgress = false;
 let remoteSyncWarningShown = false;
+let remoteSyncDisabled = false;
+let remoteSyncFailureCount = 0;
+let pendingRemoteSyncNotice = '';
 
 // =========================================
 // 3. INITIALIZATION
@@ -88,7 +91,39 @@ function getRemoteDbUrl() {
 }
 
 function hasRemoteDb() {
-    return Boolean(getRemoteDbUrl());
+    return !remoteSyncDisabled && Boolean(getRemoteDbUrl());
+}
+
+function disableRemoteSync(message, options = {}) {
+    const { notifyUser = true } = options;
+    remoteSyncDisabled = true;
+
+    if (!message || remoteSyncWarningShown) return;
+
+    if (notifyUser && currentUser) {
+        showToast(message, 'warning');
+        remoteSyncWarningShown = true;
+        return;
+    }
+
+    pendingRemoteSyncNotice = message;
+}
+
+function flushPendingRemoteSyncNotice() {
+    if (!pendingRemoteSyncNotice || remoteSyncWarningShown || !currentUser) return;
+    showToast(pendingRemoteSyncNotice, 'warning');
+    remoteSyncWarningShown = true;
+    pendingRemoteSyncNotice = '';
+}
+
+function registerRemoteSyncFailure(error, context = 'sync', options = {}) {
+    const { notifyUser = true } = options;
+    remoteSyncFailureCount += 1;
+    console.error(`Google Sheets ${context} failed (${remoteSyncFailureCount}/2):`, error);
+
+    if (remoteSyncFailureCount >= 2) {
+        disableRemoteSync('Cloud sync failed repeatedly. Working in local mode for this session.', { notifyUser });
+    }
 }
 
 function isUsableAppData(data) {
@@ -116,7 +151,16 @@ async function fetchRemoteAppData() {
         throw new Error(`Remote load failed (${response.status})`);
     }
 
-    const payload = await response.json();
+    const responseText = await response.text();
+    if (!responseText) return null;
+
+    let payload = null;
+    try {
+        payload = JSON.parse(responseText);
+    } catch (error) {
+        throw new Error('Remote load returned a non-JSON response');
+    }
+
     if (payload && payload.ok === false) {
         throw new Error(payload.error || 'Remote load returned an error payload');
     }
@@ -160,6 +204,7 @@ async function pushRemoteAppData() {
         }
     }
 
+    remoteSyncFailureCount = 0;
     return true;
 }
 
@@ -173,11 +218,7 @@ function queueRemoteSave() {
         try {
             await pushRemoteAppData();
         } catch (error) {
-            console.error('Google Sheets sync save failed:', error);
-            if (!remoteSyncWarningShown) {
-                showToast('Cloud sync failed. Data saved locally.', 'warning');
-                remoteSyncWarningShown = true;
-            }
+            registerRemoteSyncFailure(error, 'sync save', { notifyUser: Boolean(currentUser) });
         } finally {
             remoteSaveInProgress = false;
         }
@@ -186,12 +227,16 @@ function queueRemoteSave() {
 
 async function loadAppData() {
     try {
+        const stored = localStorage.getItem('ferretto_edu_pro_data');
+
         if (hasRemoteDb()) {
             try {
                 const remoteData = await fetchRemoteAppData();
                 if (isUsableAppData(remoteData)) {
                     appData = remoteData;
                     ensureDataIntegrity();
+                    localStorage.setItem('ferretto_edu_pro_data', JSON.stringify(appData));
+                    remoteSyncFailureCount = 0;
                     console.log('Loaded cloud data from Google Sheets');
                     return;
                 }
@@ -200,22 +245,25 @@ async function loadAppData() {
                     console.warn('Cloud data is empty/invalid. Falling back to local/default data.');
                 }
             } catch (error) {
-                console.error('Google Sheets sync load failed. Using default dataset:', error);
+                registerRemoteSyncFailure(error, 'sync load', { notifyUser: false });
             }
-        } else {
+        }
+
+        if (stored) {
             appData = JSON.parse(stored);
             ensureDataIntegrity();
-            if (!isUsableAppData(appData)) {
-                console.warn('Local data was invalid. Restoring default dataset.');
-                appData = getDefaultData();
-                localStorage.setItem('ferretto_edu_pro_data', JSON.stringify(appData));
-                queueRemoteSave();
+            if (isUsableAppData(appData)) {
+                console.log('Loaded existing local data');
+                return;
             }
-            console.log("Loaded existing data");
+
+            console.warn('Local data was invalid. Restoring default dataset.');
         }
 
         appData = getDefaultData();
         ensureDataIntegrity();
+        localStorage.setItem('ferretto_edu_pro_data', JSON.stringify(appData));
+        queueRemoteSave();
     } catch (error) {
         console.error('Failed to load app data:', error);
         appData = getDefaultData();
@@ -569,6 +617,7 @@ function checkAuth() {
     if (storedUser) {
         currentUser = JSON.parse(storedUser);
         activeSessions.add(currentUser.id);
+        flushPendingRemoteSyncNotice();
         showDashboard();
     } else {
         showLogin();
@@ -605,6 +654,7 @@ function handleLogin(e) {
         logSystem('LOGIN', `User ${username} logged in`, user.id);
         
         showToast(`Welcome back, ${user.name}!`, 'success');
+        flushPendingRemoteSyncNotice();
         showDashboard();
     } else {
         logSystem('LOGIN_FAILED', `Failed login attempt for username: ${username}`);
@@ -1868,10 +1918,12 @@ async function loadFaceApiModels() {
 
     try {
         const modelUrls = [
-            `${window.location.origin}/models/face-api`,
+            new URL('./models/face-api', window.location.href).toString().replace(/\/$/, ''),
+            new URL('./models', window.location.href).toString().replace(/\/$/, ''),
+            'https://justadudewhohacks.github.io/face-api.js/weights',
+            'https://cdn.jsdelivr.net/gh/justadudewhohacks/face-api.js/weights',
             'https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/weights',
-            'https://unpkg.com/face-api.js@0.22.2/weights',
-            'https://justadudewhohacks.github.io/face-api.js/weights'
+            'https://unpkg.com/face-api.js@0.22.2/weights'
         ];
 
         const loadErrors = [];
