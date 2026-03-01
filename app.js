@@ -65,6 +65,7 @@ let registrationProcessingFrame = false;
 let remoteSaveTimeout = null;
 let remoteSaveInProgress = false;
 let remoteSyncWarningShown = false;
+let remoteSyncDisabled = false;
 
 // =========================================
 // 3. INITIALIZATION
@@ -88,7 +89,15 @@ function getRemoteDbUrl() {
 }
 
 function hasRemoteDb() {
-    return Boolean(getRemoteDbUrl());
+    return !remoteSyncDisabled && Boolean(getRemoteDbUrl());
+}
+
+function disableRemoteSync(message) {
+    remoteSyncDisabled = true;
+    if (!remoteSyncWarningShown && message) {
+        showToast(message, 'warning');
+        remoteSyncWarningShown = true;
+    }
 }
 
 function isUsableAppData(data) {
@@ -116,7 +125,16 @@ async function fetchRemoteAppData() {
         throw new Error(`Remote load failed (${response.status})`);
     }
 
-    const payload = await response.json();
+    const responseText = await response.text();
+    if (!responseText) return null;
+
+    let payload = null;
+    try {
+        payload = JSON.parse(responseText);
+    } catch (error) {
+        throw new Error('Remote load returned a non-JSON response');
+    }
+
     if (payload && payload.ok === false) {
         throw new Error(payload.error || 'Remote load returned an error payload');
     }
@@ -174,10 +192,7 @@ function queueRemoteSave() {
             await pushRemoteAppData();
         } catch (error) {
             console.error('Google Sheets sync save failed:', error);
-            if (!remoteSyncWarningShown) {
-                showToast('Cloud sync failed. Data saved locally.', 'warning');
-                remoteSyncWarningShown = true;
-            }
+            disableRemoteSync('Cloud sync failed. Working in local mode for this session.');
         } finally {
             remoteSaveInProgress = false;
         }
@@ -186,12 +201,15 @@ function queueRemoteSave() {
 
 async function loadAppData() {
     try {
+        const stored = localStorage.getItem('ferretto_edu_pro_data');
+
         if (hasRemoteDb()) {
             try {
                 const remoteData = await fetchRemoteAppData();
                 if (isUsableAppData(remoteData)) {
                     appData = remoteData;
                     ensureDataIntegrity();
+                    localStorage.setItem('ferretto_edu_pro_data', JSON.stringify(appData));
                     console.log('Loaded cloud data from Google Sheets');
                     return;
                 }
@@ -200,22 +218,26 @@ async function loadAppData() {
                     console.warn('Cloud data is empty/invalid. Falling back to local/default data.');
                 }
             } catch (error) {
-                console.error('Google Sheets sync load failed. Using default dataset:', error);
+                console.error('Google Sheets sync load failed. Falling back to local data:', error);
+                disableRemoteSync('Cloud sync is unavailable. Loaded local data for this session.');
             }
-        } else {
+        }
+
+        if (stored) {
             appData = JSON.parse(stored);
             ensureDataIntegrity();
-            if (!isUsableAppData(appData)) {
-                console.warn('Local data was invalid. Restoring default dataset.');
-                appData = getDefaultData();
-                localStorage.setItem('ferretto_edu_pro_data', JSON.stringify(appData));
-                queueRemoteSave();
+            if (isUsableAppData(appData)) {
+                console.log('Loaded existing local data');
+                return;
             }
-            console.log("Loaded existing data");
+
+            console.warn('Local data was invalid. Restoring default dataset.');
         }
 
         appData = getDefaultData();
         ensureDataIntegrity();
+        localStorage.setItem('ferretto_edu_pro_data', JSON.stringify(appData));
+        queueRemoteSave();
     } catch (error) {
         console.error('Failed to load app data:', error);
         appData = getDefaultData();
@@ -1868,10 +1890,11 @@ async function loadFaceApiModels() {
 
     try {
         const modelUrls = [
-            `${window.location.origin}/models/face-api`,
-            'https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/weights',
-            'https://unpkg.com/face-api.js@0.22.2/weights',
-            'https://justadudewhohacks.github.io/face-api.js/weights'
+            new URL('./models/face-api', window.location.href).toString().replace(/\/$/, ''),
+            new URL('./models', window.location.href).toString().replace(/\/$/, ''),
+            'https://justadudewhohacks.github.io/face-api.js/weights',
+            'https://cdn.jsdelivr.net/gh/justadudewhohacks/face-api.js/weights',
+            'https://unpkg.com/face-api.js@0.22.2/weights'
         ];
 
         const loadErrors = [];
