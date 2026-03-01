@@ -1851,18 +1851,30 @@ function descriptorDistanceToConfidence(distance) {
 
 async function loadFaceApiModels() {
     if (faceApiModelsLoaded) return true;
-    if (typeof faceapi === 'undefined') {
-        showToast('Face API library not loaded. Please refresh the page.', 'error');
+
+    const waitForFaceApi = async (timeoutMs = 8000) => {
+        const start = Date.now();
+        while (typeof faceapi === 'undefined' && Date.now() - start < timeoutMs) {
+            await new Promise(resolve => setTimeout(resolve, 100));
+        }
+        return typeof faceapi !== 'undefined';
+    };
+
+    const faceApiReady = await waitForFaceApi();
+    if (!faceApiReady) {
+        showToast('Face API library did not finish loading. Please refresh the page and try again.', 'error');
         return false;
     }
+
     try {
         const modelUrls = [
+            `${window.location.origin}/models/face-api`,
             'https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/weights',
+            'https://unpkg.com/face-api.js@0.22.2/weights',
             'https://justadudewhohacks.github.io/face-api.js/weights'
         ];
 
-        let loaded = false;
-        let lastError = null;
+        const loadErrors = [];
 
         for (const modelUrl of modelUrls) {
             try {
@@ -1871,23 +1883,18 @@ async function loadFaceApiModels() {
                     faceapi.nets.faceLandmark68Net.loadFromUri(modelUrl),
                     faceapi.nets.faceRecognitionNet.loadFromUri(modelUrl)
                 ]);
-                loaded = true;
-                break;
+                faceApiModelsLoaded = true;
+                console.log('Face API models loaded from:', modelUrl);
+                return true;
             } catch (err) {
-                lastError = err;
+                loadErrors.push(`${modelUrl}: ${err?.message || err}`);
             }
         }
 
-        if (!loaded) {
-            throw lastError || new Error('Unable to load face recognition models from configured CDNs');
-        }
-
-        faceApiModelsLoaded = true;
-        console.log('Face API models loaded');
-        return true;
+        throw new Error(`Unable to load face recognition models from configured sources. ${loadErrors.join(' | ')}`);
     } catch (err) {
         console.error('Failed to load face models:', err);
-        showToast('Failed to load face recognition models', 'error');
+        showToast('Failed to load face recognition models. Check internet connection or host /models/face-api locally.', 'error');
         return false;
     }
 }
