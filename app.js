@@ -38,7 +38,20 @@ const CLOUD_SYNC_CONFIG = {
     WEB_APP_URL: (typeof window !== 'undefined' && window.FERRETTO_GOOGLE_SHEETS_WEB_APP_URL)
         ? String(window.FERRETTO_GOOGLE_SHEETS_WEB_APP_URL).trim()
         : '',
-    SAVE_DEBOUNCE_MS: 1200
+    OAUTH_CLIENT_ID: (typeof window !== 'undefined' && window.FERRETTO_GOOGLE_OAUTH_CLIENT_ID)
+        ? String(window.FERRETTO_GOOGLE_OAUTH_CLIENT_ID).trim()
+        : '',
+    OAUTH_REDIRECT_URI: (typeof window !== 'undefined' && window.FERRETTO_GOOGLE_OAUTH_REDIRECT_URI)
+        ? String(window.FERRETTO_GOOGLE_OAUTH_REDIRECT_URI).trim()
+        : (typeof window !== 'undefined' ? window.location.origin + window.location.pathname : ''),
+    TOKEN_PROXY_URL: (typeof window !== 'undefined' && window.FERRETTO_GOOGLE_OAUTH_TOKEN_PROXY_URL)
+        ? String(window.FERRETTO_GOOGLE_OAUTH_TOKEN_PROXY_URL).trim()
+        : '',
+    ACCESS_TOKEN_STORAGE_KEY: 'ferretto_google_oauth_access_token',
+    REFRESH_TOKEN_STORAGE_KEY: 'ferretto_google_oauth_refresh_token',
+    TOKEN_EXPIRY_STORAGE_KEY: 'ferretto_google_oauth_access_token_expiry',
+    SAVE_DEBOUNCE_MS: 1200,
+    POLL_INTERVAL_MS: 60000
 };
 
 
@@ -65,6 +78,13 @@ let registrationProcessingFrame = false;
 let remoteSaveTimeout = null;
 let remoteSaveInProgress = false;
 let remoteSyncWarningShown = false;
+let remotePollingHandle = null;
+let syncIndexes = {
+    usersById: new Map(),
+    coursesById: new Map(),
+    projectsById: new Map(),
+    groupsById: new Map()
+};
 
 // =========================================
 // 3. INITIALIZATION
@@ -91,6 +111,159 @@ function hasRemoteDb() {
     return Boolean(getRemoteDbUrl());
 }
 
+function logSyncEvent(level, message, extra = {}) {
+    const method = level === 'error' ? 'error' : level === 'warn' ? 'warn' : 'log';
+    console[method](`[Cloud Sync] ${message}`, extra);
+}
+
+function getStoredTokenValue(key) {
+    try {
+        return sessionStorage.getItem(key) || localStorage.getItem(key) || '';
+    } catch (error) {
+        logSyncEvent('warn', 'Token storage read failed', { error });
+        return '';
+    }
+}
+
+function setStoredTokenValue(key, value) {
+    try {
+        if (value) {
+            sessionStorage.setItem(key, value);
+            localStorage.setItem(key, value);
+        } else {
+            sessionStorage.removeItem(key);
+            localStorage.removeItem(key);
+        }
+    } catch (error) {
+        logSyncEvent('warn', 'Token storage write failed', { error });
+    }
+}
+
+function isAccessTokenValid() {
+    const expiryRaw = getStoredTokenValue(CLOUD_SYNC_CONFIG.TOKEN_EXPIRY_STORAGE_KEY);
+    const expiry = Number(expiryRaw);
+    if (!expiry) return false;
+    return Date.now() < expiry - 10000;
+}
+
+function buildAuthHeaders() {
+    const token = getStoredTokenValue(CLOUD_SYNC_CONFIG.ACCESS_TOKEN_STORAGE_KEY);
+    if (!token) return {};
+    return { Authorization: `Bearer ${token}` };
+}
+
+function createPkcePair() {
+    const random = crypto.getRandomValues(new Uint8Array(32));
+    const verifier = Array.from(random).map((n) => n.toString(16).padStart(2, '0')).join('');
+    const encoder = new TextEncoder();
+    return crypto.subtle.digest('SHA-256', encoder.encode(verifier)).then((hashBuffer) => {
+        const hashArray = Array.from(new Uint8Array(hashBuffer));
+        const challenge = btoa(String.fromCharCode(...hashArray))
+            .replace(/\+/g, '-')
+            .replace(/\//g, '_')
+            .replace(/=+$/g, '');
+        return { verifier, challenge };
+    });
+}
+
+async function exchangeCodeForToken(code, codeVerifier) {
+    if (!CLOUD_SYNC_CONFIG.TOKEN_PROXY_URL) {
+        throw new Error('Missing OAuth token proxy URL');
+    }
+    const response = await fetch(CLOUD_SYNC_CONFIG.TOKEN_PROXY_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            grant_type: 'authorization_code',
+            code,
+            code_verifier: codeVerifier,
+            redirect_uri: CLOUD_SYNC_CONFIG.OAUTH_REDIRECT_URI
+        })
+    });
+    if (!response.ok) {
+        throw new Error(`Token exchange failed (${response.status})`);
+    }
+    const payload = await response.json();
+    if (!payload?.access_token) {
+        throw new Error('Token exchange did not return access_token');
+    }
+    setStoredTokenValue(CLOUD_SYNC_CONFIG.ACCESS_TOKEN_STORAGE_KEY, payload.access_token);
+    if (payload.refresh_token) {
+        setStoredTokenValue(CLOUD_SYNC_CONFIG.REFRESH_TOKEN_STORAGE_KEY, payload.refresh_token);
+    }
+    if (payload.expires_in) {
+        setStoredTokenValue(
+            CLOUD_SYNC_CONFIG.TOKEN_EXPIRY_STORAGE_KEY,
+            String(Date.now() + Number(payload.expires_in) * 1000)
+        );
+    }
+}
+
+async function refreshAccessToken() {
+    const refreshToken = getStoredTokenValue(CLOUD_SYNC_CONFIG.REFRESH_TOKEN_STORAGE_KEY);
+    if (!refreshToken || !CLOUD_SYNC_CONFIG.TOKEN_PROXY_URL) return false;
+    const response = await fetch(CLOUD_SYNC_CONFIG.TOKEN_PROXY_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            grant_type: 'refresh_token',
+            refresh_token: refreshToken
+        })
+    });
+    if (!response.ok) return false;
+    const payload = await response.json();
+    if (!payload?.access_token) return false;
+    setStoredTokenValue(CLOUD_SYNC_CONFIG.ACCESS_TOKEN_STORAGE_KEY, payload.access_token);
+    if (payload.expires_in) {
+        setStoredTokenValue(
+            CLOUD_SYNC_CONFIG.TOKEN_EXPIRY_STORAGE_KEY,
+            String(Date.now() + Number(payload.expires_in) * 1000)
+        );
+    }
+    return true;
+}
+
+async function ensureGoogleAuth() {
+    if (!hasRemoteDb()) return;
+    if (isAccessTokenValid()) return;
+    const refreshed = await refreshAccessToken();
+    if (refreshed || isAccessTokenValid()) return;
+    if (!CLOUD_SYNC_CONFIG.OAUTH_CLIENT_ID || !CLOUD_SYNC_CONFIG.TOKEN_PROXY_URL) return;
+
+    const url = new URL(window.location.href);
+    const code = url.searchParams.get('code');
+    const state = url.searchParams.get('state');
+    const storedState = sessionStorage.getItem('ferretto_oauth_state');
+    if (code && state && storedState && state === storedState) {
+        const verifier = sessionStorage.getItem('ferretto_oauth_verifier');
+        if (verifier) {
+            await exchangeCodeForToken(code, verifier);
+            url.searchParams.delete('code');
+            url.searchParams.delete('state');
+            window.history.replaceState({}, '', url.toString());
+            return;
+        }
+    }
+
+    const { verifier, challenge } = await createPkcePair();
+    const newState = generateGlobalId('oauth_state');
+    sessionStorage.setItem('ferretto_oauth_verifier', verifier);
+    sessionStorage.setItem('ferretto_oauth_state', newState);
+
+    const authUrl = new URL('https://accounts.google.com/o/oauth2/v2/auth');
+    authUrl.searchParams.set('client_id', CLOUD_SYNC_CONFIG.OAUTH_CLIENT_ID);
+    authUrl.searchParams.set('redirect_uri', CLOUD_SYNC_CONFIG.OAUTH_REDIRECT_URI);
+    authUrl.searchParams.set('response_type', 'code');
+    authUrl.searchParams.set('scope', 'https://www.googleapis.com/auth/spreadsheets');
+    authUrl.searchParams.set('access_type', 'offline');
+    authUrl.searchParams.set('include_granted_scopes', 'true');
+    authUrl.searchParams.set('prompt', 'consent');
+    authUrl.searchParams.set('code_challenge_method', 'S256');
+    authUrl.searchParams.set('code_challenge', challenge);
+    authUrl.searchParams.set('state', newState);
+    window.location.assign(authUrl.toString());
+}
+
 function isUsableAppData(data) {
     return Boolean(
         data &&
@@ -103,13 +276,15 @@ function isUsableAppData(data) {
 async function fetchRemoteAppData() {
     const remoteUrl = getRemoteDbUrl();
     if (!remoteUrl) return null;
+    await ensureGoogleAuth();
 
     const requestUrl = `${remoteUrl}${remoteUrl.includes('?') ? '&' : '?'}action=load`;
     const response = await fetch(requestUrl, {
         method: 'GET',
         mode: 'cors',
         credentials: 'omit',
-        redirect: 'follow'
+        redirect: 'follow',
+        headers: buildAuthHeaders()
     });
 
     if (!response.ok) {
@@ -127,6 +302,7 @@ async function fetchRemoteAppData() {
 async function pushRemoteAppData() {
     const remoteUrl = getRemoteDbUrl();
     if (!remoteUrl) return true;
+    await ensureGoogleAuth();
 
     // Use text/plain so request remains CORS-simple (avoids preflight failure on Apps Script web apps).
     const response = await fetch(remoteUrl, {
@@ -134,7 +310,7 @@ async function pushRemoteAppData() {
         mode: 'cors',
         credentials: 'omit',
         redirect: 'follow',
-        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        headers: { 'Content-Type': 'text/plain;charset=utf-8', ...buildAuthHeaders() },
         body: JSON.stringify({
             action: 'save',
             updatedAt: new Date().toISOString(),
@@ -186,12 +362,15 @@ function queueRemoteSave() {
 
 async function loadAppData() {
     try {
+        const stored = localStorage.getItem('ferretto_edu_pro_data');
         if (hasRemoteDb()) {
             try {
                 const remoteData = await fetchRemoteAppData();
                 if (isUsableAppData(remoteData)) {
                     appData = remoteData;
                     ensureDataIntegrity();
+                    rebuildSyncIndexes();
+                    startScheduledSync();
                     console.log('Loaded cloud data from Google Sheets');
                     return;
                 }
@@ -202,7 +381,9 @@ async function loadAppData() {
             } catch (error) {
                 console.error('Google Sheets sync load failed. Using default dataset:', error);
             }
-        } else {
+        }
+
+        if (stored) {
             appData = JSON.parse(stored);
             ensureDataIntegrity();
             if (!isUsableAppData(appData)) {
@@ -212,14 +393,21 @@ async function loadAppData() {
                 queueRemoteSave();
             }
             console.log("Loaded existing data");
+            rebuildSyncIndexes();
+            startScheduledSync();
+            return;
         }
 
         appData = getDefaultData();
         ensureDataIntegrity();
+        rebuildSyncIndexes();
+        startScheduledSync();
     } catch (error) {
         console.error('Failed to load app data:', error);
         appData = getDefaultData();
         ensureDataIntegrity();
+        rebuildSyncIndexes();
+        startScheduledSync();
     }
 }
 
@@ -269,6 +457,10 @@ function pruneDataForStorage(data) {
 
 function saveAppData() {
     try {
+        appData.metadata = appData.metadata || {};
+        appData.metadata.updatedAt = new Date().toISOString();
+        ensureDataIntegrity();
+        rebuildSyncIndexes();
         localStorage.setItem('ferretto_edu_pro_data', JSON.stringify(appData));
         queueRemoteSave();
         return true;
@@ -559,6 +751,154 @@ function ensureDataIntegrity() {
         materialDownloads: {}
     };
     appData.metadata = appData.metadata || {};
+    appData.metadata.updatedAt = appData.metadata.updatedAt || new Date().toISOString();
+    appData.metadata.dataVersion = ENTERPRISE_CONFIG.VERSION;
+
+    appData.users = deduplicateById(appData.users, 'username');
+    appData.courses = deduplicateById(appData.courses, 'code');
+    appData.materials = deduplicateById(appData.materials, 'title');
+    appData.projects = deduplicateById(appData.projects, 'name');
+    appData.groups = deduplicateById(appData.groups, 'name');
+    appData.groupMessages = deduplicateById(appData.groupMessages);
+    appData.attendance = deduplicateAttendanceRecords(appData.attendance);
+
+    repairRelationships();
+}
+
+function normalizeRecordTimestamp(record) {
+    const raw = record?.updatedAt || record?.createdAt;
+    const parsed = raw ? Date.parse(raw) : NaN;
+    return Number.isNaN(parsed) ? 0 : parsed;
+}
+
+function mergeRecordByFreshness(currentRecord, incomingRecord) {
+    const currentTs = normalizeRecordTimestamp(currentRecord);
+    const incomingTs = normalizeRecordTimestamp(incomingRecord);
+    return incomingTs >= currentTs ? incomingRecord : currentRecord;
+}
+
+function deduplicateById(records, fallbackUniqueField = null) {
+    if (!Array.isArray(records)) return [];
+    const idMap = new Map();
+    const fallbackMap = new Map();
+
+    for (const record of records) {
+        if (!record || typeof record !== 'object') continue;
+        const identity = String(record.id || '');
+        if (identity) {
+            idMap.set(identity, mergeRecordByFreshness(idMap.get(identity), record));
+            continue;
+        }
+        if (fallbackUniqueField && record[fallbackUniqueField]) {
+            const fallbackKey = String(record[fallbackUniqueField]).toLowerCase();
+            fallbackMap.set(fallbackKey, mergeRecordByFreshness(fallbackMap.get(fallbackKey), record));
+        }
+    }
+
+    return [...idMap.values(), ...fallbackMap.values()];
+}
+
+function deduplicateAttendanceRecords(records) {
+    if (!Array.isArray(records)) return [];
+    const byNaturalKey = new Map();
+    for (const record of records) {
+        if (!record || typeof record !== 'object') continue;
+        const naturalKey = [record.userId, record.courseId, record.date, record.time, record.status].join('|');
+        byNaturalKey.set(naturalKey, mergeRecordByFreshness(byNaturalKey.get(naturalKey), record));
+    }
+    return [...byNaturalKey.values()];
+}
+
+function repairRelationships() {
+    const validCourseIds = new Set(appData.courses.map((course) => Number(course.id)));
+    const validUserIds = new Set(appData.users.map((user) => Number(user.id)));
+    const validGroupIds = new Set(appData.groups.map((group) => Number(group.id)));
+
+    appData.users = appData.users.map((user) => {
+        if (!user || typeof user !== 'object') return user;
+        const normalizedCourseId = user.courseId == null ? null : Number(user.courseId);
+        return {
+            ...user,
+            courseId: validCourseIds.has(normalizedCourseId) ? normalizedCourseId : null
+        };
+    });
+
+    appData.projects = appData.projects.filter((project) => validUserIds.has(Number(project.userId)));
+    appData.materials = appData.materials.filter((material) => {
+        if (!material || typeof material !== 'object') return false;
+        return material.courseId == null || validCourseIds.has(Number(material.courseId));
+    });
+    appData.attendance = appData.attendance.filter((entry) => {
+        if (!entry || typeof entry !== 'object') return false;
+        return validUserIds.has(Number(entry.userId)) && validCourseIds.has(Number(entry.courseId));
+    });
+    appData.groups = appData.groups.map((group) => ({
+        ...group,
+        memberIds: Array.isArray(group.memberIds)
+            ? [...new Set(group.memberIds.map((id) => Number(id)).filter((id) => validUserIds.has(id)))]
+            : []
+    }));
+    appData.groupMessages = appData.groupMessages.filter((message) => {
+        if (!message || typeof message !== 'object') return false;
+        return validGroupIds.has(Number(message.groupId)) && validUserIds.has(Number(message.userId));
+    });
+}
+
+function rebuildSyncIndexes() {
+    syncIndexes = {
+        usersById: new Map(appData.users.map((user) => [String(user.id), user])),
+        coursesById: new Map(appData.courses.map((course) => [String(course.id), course])),
+        projectsById: new Map(appData.projects.map((project) => [String(project.id), project])),
+        groupsById: new Map(appData.groups.map((group) => [String(group.id), group]))
+    };
+}
+
+function getUserById(userId) {
+    return syncIndexes.usersById.get(String(userId)) || null;
+}
+
+function getCourseById(courseId) {
+    return syncIndexes.coursesById.get(String(courseId)) || null;
+}
+
+function mergeLocalAndRemote(localData, remoteData) {
+    if (!localData) return remoteData;
+    if (!remoteData) return localData;
+    const merged = { ...localData, ...remoteData };
+
+    const keys = ['users', 'courses', 'materials', 'attendance', 'projects', 'groups', 'groupMessages'];
+    keys.forEach((key) => {
+        if (key === 'attendance') {
+            merged[key] = deduplicateAttendanceRecords([...(localData[key] || []), ...(remoteData[key] || [])]);
+        } else {
+            merged[key] = deduplicateById([...(localData[key] || []), ...(remoteData[key] || [])]);
+        }
+    });
+    merged.analytics = { ...(localData.analytics || {}), ...(remoteData.analytics || {}) };
+    merged.metadata = mergeRecordByFreshness(localData.metadata || {}, remoteData.metadata || {});
+    return merged;
+}
+
+async function syncRemoteIntoLocal() {
+    if (!hasRemoteDb() || remoteSaveInProgress) return;
+    try {
+        const remoteData = await fetchRemoteAppData();
+        if (!remoteData || typeof remoteData !== 'object') return;
+        appData = mergeLocalAndRemote(appData, remoteData);
+        ensureDataIntegrity();
+        rebuildSyncIndexes();
+        localStorage.setItem('ferretto_edu_pro_data', JSON.stringify(appData));
+    } catch (error) {
+        logSyncEvent('warn', 'Scheduled remote sync read failed', { error });
+    }
+}
+
+function startScheduledSync() {
+    if (!hasRemoteDb()) return;
+    if (remotePollingHandle) clearInterval(remotePollingHandle);
+    remotePollingHandle = setInterval(() => {
+        syncRemoteIntoLocal();
+    }, CLOUD_SYNC_CONFIG.POLL_INTERVAL_MS);
 }
 
 // =========================================
@@ -702,7 +1042,7 @@ function refreshDashboard() {
     
     // Update course info
     if (currentUser.courseId) {
-        const course = appData.courses.find(c => c.id == currentUser.courseId);
+        const course = getCourseById(currentUser.courseId);
         if (course) {
             document.getElementById('statCourseName').textContent = course.name;
             document.getElementById('statCourseCode').textContent = course.code;
@@ -753,7 +1093,7 @@ function updateRecentActivity() {
         .reverse();
     
     recentAtt.forEach(att => {
-        const course = appData.courses.find(c => c.id == att.courseId);
+        const course = getCourseById(att.courseId);
         activities.push({
             date: `${att.date} ${att.time || ''}`,
             activity: 'Attendance',
@@ -3720,7 +4060,7 @@ function loadSettings() {
     document.getElementById('settingsEmail').textContent = currentUser.email || 'No email';
     document.getElementById('settingsRole').textContent = currentUser.role.toUpperCase();
     document.getElementById('settingsUsername').textContent = currentUser.username;
-    const course = appData.courses.find(c => c.id == currentUser.courseId);
+    const course = getCourseById(currentUser.courseId);
     document.getElementById('settingsCourse').textContent = course ? course.name : 'None';
     document.getElementById('settingsFaceStatus').textContent = hasRegisteredFace(currentUser.faceDescriptor) ? 'Registered' : 'Not Registered';
     const form = document.getElementById('changePasswordForm');
